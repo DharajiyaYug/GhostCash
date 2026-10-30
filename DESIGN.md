@@ -20,7 +20,7 @@ Decisions below are final for the build unless marked "open".
 
 - Shared library `include/ghostcash/`: the existing blind-signature code plus `zkp`, `merchant`, `cutchoose`, serialization.
 - Transport: HTTP + JSON (cpp-httplib, nlohmann/json, both vendored header-only). The receiver gets pushes through long-polling an inbox endpoint.
-- Storage: SQLite for wallet, app and bank. Group parameters are generated once and persisted.
+- Storage (as built): SQLite for the wallet's local coin store; the bank and the app server keep a JSON state file that is rewritten atomically after every change. Group parameters are generated once on the bank's first start and persisted in its state file.
 - Big integers are hex strings in JSON.
 - TLS is added last; no protocol logic depends on it.
 
@@ -68,15 +68,25 @@ Pages: login, balance (bank balance + local coins), Generate (pick denomination)
 - Attack suite: double spend at two receivers (traced to the right account), forged y, y for a different challenge, replayed transcript, forged signature, wrong denomination, small-subgroup A, x = 0, repeated deposit, cheating tag at k > 1, insufficient balance.
 - One end-to-end script: start bank, app and two wallet agents, run generate, transfer, redeem, then the double-spend scenario.
 
-## Fixes to the existing code (Phase 0)
-1. Wallet keeps a and s (new WalletCoin).
-2. Replace textbook hash-then-RSA with a full-domain hash.
-3. Replace the Mersenne Twister RNG with OpenSSL RAND_bytes.
-4. Subgroup and x != 0 checks on the verifier side.
-5. Align parameter sizes between demos, tests and report.
+## Fixes to the existing code (Phase 0) -- status
+1. Wallet keeps a and s (WalletCoin). Done.
+2. Full-domain hash for the signed message (SHA-256 in counter mode into Z_n). Done.
+3. RNG seeded from OpenSSL RAND_bytes instead of the clock. Done, but GMP's Mersenne Twister is still not a CSPRNG (documented in rng.hpp).
+4. Subgroup and x != 0 checks on the verifier side. Done.
+5. Parameter sizes: the servers use the specified sizes (256-bit q, 3072-bit p, 2048-bit RSA) by default and `--fast` for small ones; the unit tests use small sizes for speed; `demo_interactive` still uses reduced sizes.
 
-## Build order
-1. Phase 0 fixes. 2. zkp. 3. merchant + clearance with the tag lookup (in-process, tested); cut-and-choose is an optional step at the end. 4. Serialization + SQLite. 5. Bank server. 6. App server. 7. Wallet agent + web UI. 8. End-to-end script. 9. TLS.
+## Build order and status
+1. Phase 0 fixes. Done.
+2. zkp. Done.
+3. merchant + clearance with the tag lookup (in-process, tested). Done.
+4. Serialization + persistence. Done.
+5. Bank server. Done.
+6. App server. Done.
+7. Wallet agent + web UI. Done.
+8. End-to-end script (`scripts/e2e.py`, also at full size with `E2E_FULL=1`). Done.
+9. Optional: cut-and-choose (k > 1), TLS. Not done.
+
+Not browser-tested: the web UI renders correctly against live data (headless Chrome screenshot) but its button handlers have not been clicked through in a browser; the end-to-end script exercises the same JSON API the buttons call.
 
 ## Open
 - Deadline unknown; build order is not dated.

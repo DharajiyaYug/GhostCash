@@ -1,123 +1,132 @@
 # GhostCash
 
-A demo implementation of a Chaumian RSA blind-signature e-cash scheme
-(bank/wallet issuance protocol), built on GMP for big-integer arithmetic
-and OpenSSL (libcrypto) for SHA-256 hashing.
+Offline-capable, anonymous e-cash in C++ (GMP + OpenSSL): Chaum-style RSA blind
+signatures for issuance, a Schnorr-style proof for payment, and double-spend
+tracing at the bank. Users run a local **wallet** that holds their coins and
+does all the cryptography; an **app server** handles logins and routes
+payments; a **bank server** signs coins and clears payments.
+
+See [DESIGN.md](DESIGN.md) for the protocol, the threat model and the design
+decisions.
+
+## How it works (short)
+
+- A coin is `(serial, A = g^a, S = g^s, bank signature)`. The bank signs a
+  full-domain hash of those fields **blind**: it never sees the coin. Its value
+  comes from which denomination key signed it.
+- **Generate (withdraw):** the wallet blinds the coin, sends it to the bank
+  with a tag `T = H(a || s)`, the bank debits the account and logs `T -> account`,
+  and the wallet unblinds the signature.
+- **Transfer (pay):** wallet-to-wallet, relayed by the app, no bank contact.
+  The receiver checks the signature, sends a challenge `x = H(receiver, time, nonce)`,
+  and the payer answers `y = s + a*x`. The receiver checks `g^y == S * A^x`.
+- **Redeem (deposit):** the receiver sends the transcript to the bank. A coin
+  seen twice with different challenges gives `a` and `s`; the bank hashes them,
+  finds the tag, and flags the account that withdrew the coin.
 
 ## Dependencies
 
-- A C++17 compiler (g++ or clang++)
-- [GMP](https://gmplib.org/) (`gmp.h` + `libgmp`)
-- OpenSSL's `libcrypto` (`openssl/sha.h` + `libcrypto`)
-- Either `make`, or CMake >= 3.16 (either works — pick one)
+- A C++17 compiler (g++ or clang++), `make` (or CMake >= 3.16)
+- [GMP](https://gmplib.org/), OpenSSL `libcrypto`, SQLite3
+- `python3` (only for the end-to-end script)
 
-Install the two libraries first:
+| Platform        | Command                                                              |
+|-----------------|----------------------------------------------------------------------|
+| Debian / Ubuntu | `sudo apt-get install build-essential libgmp-dev libssl-dev libsqlite3-dev python3` |
+| Fedora / RHEL   | `sudo dnf install gcc-c++ make gmp-devel openssl-devel sqlite-devel python3`         |
+| Windows         | use WSL (Ubuntu) and the Debian/Ubuntu line above                    |
 
-| Platform              | Command                                              |
-|-----------------------|-------------------------------------------------------|
-| Debian / Ubuntu       | `sudo apt-get install libgmp-dev libssl-dev`          |
-| Fedora / RHEL         | `sudo dnf install gmp-devel openssl-devel`            |
-| Arch                  | `sudo pacman -S gmp openssl`                          |
-| macOS (Homebrew)      | `brew install gmp openssl@3`                          |
+The HTTP and JSON libraries (cpp-httplib, nlohmann/json) are vendored under
+`third_party/`.
 
-## Building with `make`
-
-```sh
-make               # builds demo_issuance, demo_interactive, run_tests
-make run           # build + run the plain demo
-make run-interactive  # build + run the narrated, step-by-step walkthrough
-make run-tests
-make clean
-```
-
-### The interactive walkthrough
-
-`demo_interactive` prints one coin withdrawal end-to-end — including the
-bank debiting the withdrawing user's simulated account — tagged by who
-actually sees each piece of data:
-
-- `WALLET` — serial, commitments, real identifier `m`, blinding factor `r`,
-  and the final unblinded signature. **Never sent anywhere.**
-- `WIRE` — the only two values actually sent to the bank: the requested
-  denomination and the blinded message `m'`.
-- `BANK` — the account debit, and blind-signing with the key for that
-  denomination. Note the account debit and the cryptographic signing are
-  two separate steps (see `bank.hpp`): the bank can know *whose* account
-  it charged without learning *which coin identifier* it just blindly
-  signed for that account.
-- `VERIFY` — the actual RSA check spelled out (`lhs = s^e mod n` vs
-  `rhs = m mod n`), computed against **every** denomination's key, so you
-  can see the coin only matches the one it was actually signed under, plus
-  a tamper check (flipping a digit in the serial) shown the same way.
+## Build and test
 
 ```sh
-make run-interactive               # prompts for a denomination (1/5/10)
-./build/demo_interactive 10         # skip the prompt, withdraw a "10"
-./build/demo_interactive --auto     # never prompt (defaults to 1); good for
-                                     # piping into a file or a screenshot script
+make                 # demos, unit tests, bank_server, app_server, wallet_agent
+make run-tests       # unit tests (Catch2)
+make e2e             # starts a bank, an app and 3 wallets and runs the whole scenario
+E2E_FULL=1 make e2e  # same, at the specified sizes (256-bit q, 3072-bit p, 2048-bit RSA)
 ```
 
-Output is ~45 lines, designed to fit in a single terminal screenshot.
+CMake also works: `cmake -S . -B build && cmake --build build -j`.
 
-### Denominations
+If GMP/OpenSSL are not found, `make print-config` shows what was detected, and
+`make GMP_PREFIX=/path SSL_PREFIX=/path` points the build at a custom install.
 
-`Bank` holds one independent RSA keypair per denomination (`add_denomination`);
-a coin's value is never written into the signed message itself — it's
-entirely determined by which key produced a valid signature over it. See
-`tests/test_bank_wallet.cpp` for the tests that pin this down (a coin signed
-as a "5" fails verification against the "1" key, etc.).
-
-The Makefile auto-detects GMP/OpenSSL's include and library paths, in this
-order:
-
-1. `pkg-config` (works out of the box on most Linux distros, and for
-   Homebrew's OpenSSL, which ships a `.pc` file).
-2. `brew --prefix gmp` / `brew --prefix openssl` (covers Homebrew's GMP,
-   which has no `.pc` file, and is a second chance for OpenSSL on macOS).
-   This correctly resolves to `/opt/homebrew` on Apple Silicon or
-   `/usr/local` on Intel Macs — whichever `brew` itself is using.
-3. Plain `-lgmp` / `-lcrypto` with no extra `-I`/`-L`, for setups where the
-   headers/libs already live on the compiler's default search path.
-
-If none of those find your install (e.g. a from-source install in a custom
-location), point the Makefile at it directly:
+## Run the system
 
 ```sh
-make GMP_PREFIX=/path/to/gmp SSL_PREFIX=/path/to/openssl
+scripts/run_demo.sh            # full-size parameters (first start takes a few seconds)
+scripts/run_demo.sh --fast     # small parameters
 ```
 
-Run `make print-config` to see exactly which flags were auto-detected —
-handy for diagnosing a build failure on an unfamiliar machine.
+This starts the bank (`:9000`), the app server (`:8000`) and two wallets. Open
+<http://127.0.0.1:8081/> and <http://127.0.0.1:8082/> in two browser windows,
+create an account in each (new accounts get a simulated balance of 100), then:
 
-## Building with CMake
+1. **Generate** a coin in wallet A.
+2. **Transfer** it to wallet B's username (B must be signed in: the payment is
+   interactive). The protocol steps are shown live.
+3. In wallet B, **Redeem** the received payment: B's bank balance goes up.
+4. To demo a double spend: in A, generate a coin, pay it to B, then tick
+   *allow re-spending an already spent coin* and pay the same coin to a third
+   user C (a third wallet: `./build/wallet_agent --port 8083 --data demo-data/wallet-c`).
+   When B and C both redeem, the second is rejected as a double spend and
+   `logs/bank.log` shows the account the bank traced it to.
 
-```sh
-cmake -S . -B build
-cmake --build build -j
-./build/run_tests
-./build/demo_issuance
+Each program can also be started by hand. Their options (`--port`, `--state`,
+`--data`, ...) are documented at the top of each source file in `src/`.
+
+## Programs
+
+| Program        | Role | Storage |
+|----------------|------|---------|
+| `wallet_agent` | local wallet: all client-side crypto, local web UI (`ui/index.html`), JSON API | SQLite, one file per user (coins **and their secrets**, received payments, history) |
+| `app_server`   | login, user -> bank account, withdraw/redeem gateway, transfer message routing | JSON file (salted PBKDF2 password hashes) |
+| `bank_server`  | RSA keys per denomination, balances, withdrawal tag log, spent-coin database, tracing | JSON snapshot after every change (contains private keys: keep it private) |
+
+The app server never sees coin secrets and stores no coins. During a transfer
+it sees the coin and who paid whom (the honest-operator assumption).
+
+## Library layout (`include/ghostcash/`)
+
+```
+bigint, rng, group_setup, rsa_keygen   primitives
+hash_utils                             full-domain hash for signing, tag, challenge
+coin, transcript                       data types
+public_keys                            bank public keys / signature check (PublicKeySource)
+bank                                   blind signing, accounts, withdraw(tag), deposit(trace)
+wallet                                 coin generation, blinding, tag, answering challenges
+merchant                               receiver side: verify coin, challenge, verify response
+zkp                                    Schnorr proof: respond / verify / extract
+serialize                              JSON wire format and bank-state persistence
 ```
 
-`OpenSSL` is located via CMake's built-in `FindOpenSSL` module. `GMP` has no
-official CMake package, so it's located manually via `pkg-config` (if
-available) and a set of standard/Homebrew search paths. If it's installed
-somewhere else:
+`src/` has the three programs, `src/net_common.hpp`, and two issuance demos
+(`demo_issuance`, `demo_interactive`). `tests/` has the Catch2 unit and attack
+tests; `scripts/e2e.py` is the end-to-end test.
 
-```sh
-cmake -S . -B build -DGMP_ROOT=/path/to/gmp
-```
+## Tests
 
-(For OpenSSL in a nonstandard location, CMake's own `-DOPENSSL_ROOT_DIR=...`
-works as usual.)
+- Unit tests per module, plus attack simulations: double spend traced to the
+  withdrawer, forged response, replayed transcript, transcript redirected to
+  another receiver, forged signature, wrong denomination, subgroup and `x = 0`
+  attacks.
+- `scripts/e2e.py` drives the real servers over HTTP: signup, generate,
+  transfer, redeem, double spend, forged redeem, offline receiver,
+  insufficient balance, and a bank restart.
 
-## Layout
+## Known limitations
 
-```
-include/ghostcash/   public headers (bigint, group setup, RSA keygen,
-                     blind-signature bank/wallet/coin, hashing, RNG)
-src/demo_issuance.cpp     minimal end-to-end demo of the issuance protocol
-src/demo_interactive.cpp  narrated, screenshot-friendly walkthrough (see above)
-src/term_ui.hpp           terminal color/formatting helper, used only by
-                          demo_interactive (not part of the ghostcash library)
-tests/                    Catch2-based unit tests
-```
+- **Trusted tag (`k = 1`).** The bank cannot check that the tag a wallet sends
+  really is `H(a || s)` for the coin it blind-signs, so a wallet that lies about
+  its tag double-spends untraceably (it is still detected). Cut-and-choose would
+  close this; it is not implemented. A dishonest bank could also log a false tag
+  against an account.
+- **Operators are assumed honest.** The app sees who pays whom, and timing and
+  denomination could be correlated by an operator who logs it.
+- **RNG.** GMP's Mersenne Twister, seeded from OS entropy; not a CSPRNG.
+- **Plain HTTP.** No TLS yet; use only on localhost.
+- **Wallet secrets are stored unencrypted** in the local SQLite file.
+- Group generation is not the verifiable seeded FIPS 186 procedure.
+- Coins are single-use: a received payment is redeemed, not re-spent.
