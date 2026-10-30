@@ -36,6 +36,7 @@
 #include "ghostcash/bigint.hpp"
 #include "ghostcash/group_setup.hpp"
 #include "ghostcash/hash_utils.hpp"
+#include "ghostcash/public_keys.hpp"
 #include "ghostcash/rsa_keygen.hpp"
 #include "ghostcash/transcript.hpp"
 #include "ghostcash/zkp.hpp"
@@ -62,8 +63,12 @@ struct DepositResult {
     BigInt a, s;                 // DoubleSpend: the extracted coin secrets
 };
 
-class Bank {
+struct BankPersistence; // save/load of the whole bank state (serialize.hpp)
+
+class Bank : public PublicKeySource {
 public:
+    friend struct BankPersistence;
+
     Bank() = default;
 
     // The public group (p, q, g), needed to verify proofs at deposit time.
@@ -82,7 +87,7 @@ public:
         keys_.emplace(denomination, RSAKeyGen::generate(rsa_bits, rng));
     }
 
-    bool has_denomination(int denomination) const {
+    bool has_denomination(int denomination) const override {
         return keys_.count(denomination) != 0;
     }
 
@@ -94,8 +99,8 @@ public:
         return result;
     }
 
-    const BigInt& public_modulus(int denomination) const { return key_for(denomination).n; }
-    const BigInt& public_exponent(int denomination) const { return key_for(denomination).e; }
+    const BigInt& public_modulus(int denomination) const override { return key_for(denomination).n; }
+    const BigInt& public_exponent(int denomination) const override { return key_for(denomination).e; }
     int modulus_bits(int denomination) const { return key_for(denomination).modulus_bits; }
 
     // Blind signing: given a blinded message m' = m * r^e mod n (computed
@@ -109,27 +114,13 @@ public:
         return BigInt::powmod(blinded_message, k.d, k.n);
     }
 
-    // Returns the two sides of the RSA verification equation, s^e mod n and
-    // m mod n, computed under the given denomination's key, without
-    // collapsing them into a bool. Lets a caller display "here's the actual
-    // arithmetic" instead of just VALID/INVALID.
-    std::pair<BigInt, BigInt> verify_check(int denomination, const BigInt& message, const BigInt& signature) const {
-        const RSAKeyPair& k = key_for(denomination);
-        BigInt lhs = BigInt::powmod(signature, k.e, k.n);
-        BigInt rhs = BigInt::mod(message, k.n);
-        return {lhs, rhs};
-    }
+    // verify_check() and verify() (the RSA check s^e mod n == m under one
+    // denomination's public key) are inherited from PublicKeySource.
 
-    // Verifies an (unblinded) message/signature pair against ONE specific
-    // denomination's public key: checks that s^e mod n == m. This does not
-    // search across denominations -- whoever is verifying (a merchant, or
-    // the bank at deposit time) must state which denomination the coin
-    // claims to be, and the check only passes if that's the key that
-    // actually signed it.
-    bool verify(int denomination, const BigInt& message, const BigInt& signature) const {
-        auto [lhs, rhs] = verify_check(denomination, message, signature);
-        return lhs == rhs;
-    }
+    bool has_account(const std::string& user) const { return balances_.count(user) != 0; }
+
+    bool has_group() const { return has_group_; }
+    const GroupParams& group() const { return group_; }
 
     // Full withdrawal: debits `user` for the denomination, logs the tag
     // T = H(a || s) against that account, and blind-signs. The tag is the
@@ -173,7 +164,7 @@ public:
         const Coin& c = t.coin;
         if (!has_denomination(c.denomination)) return rejected("unknown denomination");
 
-        BigInt m = HashUtils::hash_coin_identifier(c.serial, c.A, c.S);
+        BigInt m = HashUtils::coin_message(c.serial, c.A, c.S, public_modulus(c.denomination));
         if (!verify(c.denomination, m, c.signature)) return rejected("bad bank signature");
 
         BigInt x = t.challenge(group_.q);

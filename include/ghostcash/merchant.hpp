@@ -10,13 +10,13 @@
 //   finish_payment: the wallet's response y satisfies g^y == S * A^x. If so,
 //                   it returns the transcript to redeem later.
 //
-// The signature check uses the bank's public keys (n, e per denomination).
-// Here that is done through a const Bank&, but only the public-key accessors
-// and verify() are used, which is all a networked receiver would have.
+// The signature check uses only the bank's public keys (n, e per denomination),
+// through a PublicKeySource: the Bank itself in-process, or a PublicKeyRing
+// filled from the keys the bank publishes.
 
 #pragma once
 
-#include "ghostcash/bank.hpp"
+#include "ghostcash/public_keys.hpp"
 #include "ghostcash/bigint.hpp"
 #include "ghostcash/coin.hpp"
 #include "ghostcash/group_setup.hpp"
@@ -36,8 +36,8 @@ struct PaymentSession {
 
 class Merchant {
 public:
-    Merchant(std::string receiver_id, GroupParams group, const Bank& bank, gmp_randstate_t& rng)
-        : id_(std::move(receiver_id)), group_(std::move(group)), bank_(bank), rng_(rng) {}
+    Merchant(std::string receiver_id, GroupParams group, const PublicKeySource& keys, gmp_randstate_t& rng)
+        : id_(std::move(receiver_id)), group_(std::move(group)), keys_(keys), rng_(rng) {}
 
     const std::string& id() const { return id_; }
 
@@ -46,10 +46,10 @@ public:
     // system, a fixed string in tests). Returns false for a coin that should
     // not be accepted.
     bool begin_payment(const Coin& coin, const std::string& time, PaymentSession& out) {
-        if (!bank_.has_denomination(coin.denomination)) return false;
+        if (!keys_.has_denomination(coin.denomination)) return false;
 
-        BigInt m = HashUtils::hash_coin_identifier(coin.serial, coin.A, coin.S);
-        if (!bank_.verify(coin.denomination, m, coin.signature)) return false;
+        BigInt m = HashUtils::coin_message(coin.serial, coin.A, coin.S, keys_.public_modulus(coin.denomination));
+        if (!keys_.verify(coin.denomination, m, coin.signature)) return false;
 
         if (!Schnorr::is_group_element(group_, coin.A)) return false;
         if (!Schnorr::is_group_element(group_, coin.S)) return false;
@@ -72,7 +72,7 @@ public:
 private:
     std::string id_;
     GroupParams group_;
-    const Bank& bank_;
+    const PublicKeySource& keys_;
     gmp_randstate_t& rng_;
 
     // 128-bit random nonce as hex.

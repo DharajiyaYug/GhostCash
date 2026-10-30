@@ -165,9 +165,10 @@ int main(int argc, char** argv) {
 
     // --- Step 6: verification, spelled out, for every denomination -----
     std::cout << bold("[6] VERIFY") << "   s^e mod n == m mod n\n";
-    BigInt m_check = HashUtils::hash_coin_identifier(coin.serial, coin.A, coin.S);
     bool correct_ok = false;
     for (int d : denoms) {
+        // The signed message is a full-domain hash into each key's own Z_n.
+        BigInt m_check = HashUtils::coin_message(coin.serial, coin.A, coin.S, bank.public_modulus(d));
         auto [lhs, rhs] = bank.verify_check(d, m_check, coin.signature);
         bool match = (lhs == rhs);
         if (d == coin.denomination) correct_ok = match;
@@ -179,7 +180,8 @@ int main(int argc, char** argv) {
 
     Coin tampered = coin;
     tampered.serial += "00";
-    BigInt m_tampered = HashUtils::hash_coin_identifier(tampered.serial, tampered.A, tampered.S);
+    BigInt m_tampered = HashUtils::coin_message(tampered.serial, tampered.A, tampered.S,
+                                                bank.public_modulus(tampered.denomination));
     auto [t_lhs, t_rhs] = bank.verify_check(tampered.denomination, m_tampered, tampered.signature);
     bool tamper_caught = (t_lhs != t_rhs);
     std::cout << "    tampered serial:  lhs=" << truncated(t_lhs.to_string(), 12, 4)
@@ -188,7 +190,8 @@ int main(int argc, char** argv) {
 
     bool all_ok = correct_ok && tamper_caught &&
                   std::count_if(denoms.begin(), denoms.end(), [&](int d) {
-                      return bank.verify(d, m_check, coin.signature);
+                      return bank.verify(d, HashUtils::coin_message(coin.serial, coin.A, coin.S, bank.public_modulus(d)),
+                                         coin.signature);
                   }) == 1;
 
     std::cout << bold(all_ok ? green("=== Coin verified only under denomination-" +

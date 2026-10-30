@@ -1,10 +1,16 @@
 // hash_utils.hpp
 //
-// Coin identifier construction: m = H(serial || A || S), via SHA-256,
-// mapped into an integer suitable for RSA blind signing. Per project design
-// decision, hashing serial and the discrete-log commitments A, S together
-// means the bank's signature binds to the coin's commitments, not just an
-// arbitrary serial number.
+// Coin identifier construction. The bank signs
+//
+//     m = FDH_n(serial || A || S)
+//
+// a full-domain hash into Z_n for the denomination's RSA modulus n (SHA-256
+// run in counter mode until it covers n plus 128 spare bits, then reduced
+// mod n). Signing a hash that fills the whole domain, rather than a 256-bit
+// digest of a 2048-bit modulus, is what Chaum-style RSA blind signatures need
+// to avoid forgeries built by combining signed values. Hashing serial and the
+// discrete-log commitments A, S together binds the signature to the coin's
+// commitments, not just an arbitrary serial number.
 //
 // Also holds the two other hashes the protocol needs:
 //   - the withdrawal tag   T = H(a || s), which the bank logs against the
@@ -23,11 +29,29 @@ class HashUtils {
 public:
     // Concatenates serial, A, S (as decimal numeral strings, "|"-separated
     // to avoid ambiguous concatenation) and returns SHA-256(...) as a BigInt.
+    // This is only the 256-bit digest of the coin fields. The value that is
+    // actually signed is coin_message() below.
     static BigInt hash_coin_identifier(const std::string& serial,
                                         const BigInt& A,
                                         const BigInt& S) {
         std::string msg = serial + "|" + A.to_string() + "|" + S.to_string();
         return sha256_int(msg);
+    }
+
+    // The message the bank signs: FDH of the coin fields into [0, n).
+    static BigInt coin_message(const std::string& serial,
+                               const BigInt& A,
+                               const BigInt& S,
+                               const BigInt& n) {
+        std::string base = serial + "|" + A.to_string() + "|" + S.to_string();
+        size_t need = (n.bit_length() + 128 + 7) / 8;
+        std::string stream;
+        for (unsigned i = 0; stream.size() < need; ++i) {
+            stream += sha256_bytes("ghostcash-fdh|" + std::to_string(i) + "|" + base);
+        }
+        stream.resize(need);
+        BigInt wide = BigInt::from_bytes(reinterpret_cast<const unsigned char*>(stream.data()), stream.size());
+        return BigInt::mod(wide, n);
     }
 
     // Withdrawal tag T = H(a || s). a and s never appear in the coin (only
@@ -55,9 +79,14 @@ private:
         return std::to_string(s.size()) + ":" + s + "|";
     }
 
-    static BigInt sha256_int(const std::string& msg) {
+    static std::string sha256_bytes(const std::string& msg) {
         unsigned char digest[SHA256_DIGEST_LENGTH];
         SHA256(reinterpret_cast<const unsigned char*>(msg.data()), msg.size(), digest);
-        return BigInt::from_bytes(digest, SHA256_DIGEST_LENGTH);
+        return std::string(reinterpret_cast<const char*>(digest), SHA256_DIGEST_LENGTH);
+    }
+
+    static BigInt sha256_int(const std::string& msg) {
+        std::string d = sha256_bytes(msg);
+        return BigInt::from_bytes(reinterpret_cast<const unsigned char*>(d.data()), d.size());
     }
 };
