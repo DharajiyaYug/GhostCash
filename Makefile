@@ -102,12 +102,26 @@ TEST_SRCS    := tests/test_main.cpp \
                 tests/test_group_setup.cpp \
                 tests/test_rsa_keygen.cpp \
                 tests/test_hash_utils.cpp \
-                tests/test_bank_wallet.cpp
+                tests/test_bank_wallet.cpp \
+                tests/test_zkp.cpp \
+                tests/test_clearance.cpp
 TEST_BIN     := build/run_tests
 
-.PHONY: all demo interactive test run run-interactive run-tests clean print-config
+# --- networked programs (bank server, app server, wallet agent) ----------
+# Header-only HTTP + JSON libraries are vendored under third_party/. The
+# wallet agent additionally links SQLite for its local coin store.
+NET_CXXFLAGS := $(CXXFLAGS) -Ithird_party -pthread
+NET_HEADERS  := $(HEADERS) src/net_common.hpp third_party/httplib.h third_party/nlohmann/json.hpp
 
-all: demo interactive test
+BANK_BIN     := build/bank_server
+APP_BIN      := build/app_server
+WALLET_BIN   := build/wallet_agent
+
+.PHONY: all demo interactive test servers run run-interactive run-tests e2e clean print-config
+
+all: demo interactive test servers
+
+servers: $(BANK_BIN) $(APP_BIN) $(WALLET_BIN)
 
 demo: $(DEMO_BIN)
 
@@ -130,6 +144,15 @@ $(INTERACTIVE_BIN): $(INTERACTIVE_SRC) src/term_ui.hpp $(HEADERS) | build
 $(TEST_BIN): $(TEST_SRCS) $(HEADERS) tests/third_party/catch.hpp | build
 	$(CXX) $(TEST_CXXFLAGS) $(TEST_SRCS) -o $(TEST_BIN) $(LDFLAGS)
 
+$(BANK_BIN): src/bank_server.cpp $(NET_HEADERS) | build
+	$(CXX) $(NET_CXXFLAGS) src/bank_server.cpp -o $@ $(LDFLAGS)
+
+$(APP_BIN): src/app_server.cpp $(NET_HEADERS) | build
+	$(CXX) $(NET_CXXFLAGS) src/app_server.cpp -o $@ $(LDFLAGS)
+
+$(WALLET_BIN): src/wallet_agent.cpp $(NET_HEADERS) | build
+	$(CXX) $(NET_CXXFLAGS) src/wallet_agent.cpp -o $@ $(LDFLAGS) -lsqlite3
+
 build:
 	mkdir -p build
 
@@ -141,6 +164,11 @@ run-interactive: interactive
 
 run-tests: test
 	./$(TEST_BIN)
+
+# Starts a bank, an app server and three wallet agents on temporary ports
+# and runs the whole scenario (needs python3).
+e2e: servers
+	python3 scripts/e2e.py
 
 # Handy for debugging a build failure on an unfamiliar machine: shows
 # exactly which flags were auto-detected for GMP/OpenSSL.

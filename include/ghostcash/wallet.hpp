@@ -4,7 +4,7 @@
 //
 //   1. Generate a coin: random serial number, and placeholder discrete-log
 //      commitments A = g^a, S = g^s for freshly sampled secrets a, s.
-//   2. Form m = H(serial || A || S).
+//   2. Form m = FDH_n(serial || A || S), a full-domain hash into Z_n.
 //   3. Blind:   m' = m * r^e mod n,  for random blinding factor r coprime to n,
 //      using the (n, e) of whichever denomination the wallet is requesting.
 //   4. Send (denomination, m') to the bank, receive back s' = blind_sign(m').
@@ -18,8 +18,9 @@
 
 #include "ghostcash/bigint.hpp"
 #include "ghostcash/coin.hpp"
-#include "ghostcash/bank.hpp"
+#include "ghostcash/public_keys.hpp"
 #include "ghostcash/hash_utils.hpp"
+#include "ghostcash/zkp.hpp"
 #include <gmp.h>
 #include <sstream>
 
@@ -33,6 +34,18 @@ struct PendingWithdrawal {
     BigInt m;        // unblinded identifier: H(serial || A || S)
     BigInt r;         // blinding factor used
     BigInt blinded_m; // m' sent to the bank
+    BigInt a, s;      // coin secrets, kept so the wallet can answer challenges
+    BigInt tag;       // T = H(a || s), sent to the bank alongside m'
+};
+
+// A coin as the wallet holds it: the public coin plus the secrets a, s that
+// only the wallet knows. `spent` is the honest wallet's own bookkeeping; a
+// malicious wallet can ignore it by copying the struct (which is exactly how
+// the double-spend tests attack the bank).
+struct WalletCoin {
+    Coin coin;
+    BigInt a, s;
+    bool spent = false;
 };
 
 class Wallet {
@@ -44,7 +57,7 @@ public:
     // against the requested denomination's public key (n, e). Returns the
     // blinded message to send to the bank, and stores the rest in
     // `out_pending` for later unblinding.
-    BigInt prepare_withdrawal(int denomination, const Bank& bank, PendingWithdrawal& out_pending) {
+    BigInt prepare_withdrawal(int denomination, const PublicKeySource& keys, PendingWithdrawal& out_pending) {
         // Sample coin secrets a, s in [1, q-1] and form commitments A = g^a, S = g^s
         // in the prime-order subgroup, per the "Coin structure" specification.
         BigInt a = BigInt::random_below(q_, rng_);
@@ -53,13 +66,13 @@ public:
         BigInt S = BigInt::powmod(g_, s, p_);
 
         std::string serial = random_serial();
-        BigInt m = HashUtils::hash_coin_identifier(serial, A, S);
 
-        const BigInt& n = bank.public_modulus(denomination);
-        const BigInt& e = bank.public_exponent(denomination);
+        const BigInt& n = keys.public_modulus(denomination);
+        const BigInt& e = keys.public_exponent(denomination);
 
-        // m must be reduced mod n before blinding, since RSA operates in Z_n.
-        BigInt m_mod_n = BigInt::mod(m, n);
+        // m is the full-domain hash of the coin fields into Z_n, the value
+        // the bank will (blindly) sign.
+        BigInt m_mod_n = HashUtils::coin_message(serial, A, S, n);
 
         // Pick blinding factor r coprime to n (required for r to be invertible
         // mod n later, during unblinding).
@@ -72,19 +85,44 @@ public:
         BigInt r_e = BigInt::powmod(r, e, n);
         BigInt blinded_m = BigInt::mulmod(m_mod_n, r_e, n);
 
-        out_pending = PendingWithdrawal{denomination, serial, A, S, m_mod_n, r, blinded_m};
+        BigInt tag = HashUtils::hash_tag(a, s);
+
+        out_pending = PendingWithdrawal{denomination, serial, A, S, m_mod_n, r, blinded_m, a, s, tag};
         return blinded_m;
     }
 
     // Step 5-6: given the bank's blind signature s' on m', remove the
     // blinding factor to recover a valid signature s on the original m, and
     // package the result as a Coin.
-    Coin unblind(const Bank& bank, const PendingWithdrawal& pending, const BigInt& blind_signature) const {
-        const BigInt& n = bank.public_modulus(pending.denomination);
+    Coin unblind(const PublicKeySource& keys, const PendingWithdrawal& pending, const BigInt& blind_signature) const {
+        const BigInt& n = keys.public_modulus(pending.denomination);
         BigInt r_inv = BigInt::invmod(pending.r, n);
         BigInt signature = BigInt::mulmod(blind_signature, r_inv, n);
 
         return Coin{pending.serial, pending.A, pending.S, signature, pending.denomination};
+    }
+
+    // Same as unblind(), but keeps the secrets a, s with the coin so it can
+    // later be spent.
+    WalletCoin finish_withdrawal(const PublicKeySource& keys, const PendingWithdrawal& pending, const BigInt& blind_signature) const {
+        return WalletCoin{unblind(keys, pending, blind_signature), pending.a, pending.s, false};
+    }
+
+    // Answers a receiver's challenge for `wc`, writing the response to
+    // `y_out`. The challenge is re-derived here from (receiver_id, time,
+    // nonce) instead of being accepted as a bare number: the wallet only
+    // ever answers a challenge bound to the receiver it actually means to
+    // pay, so a challenge relayed from somebody else can't be answered.
+    //
+    // An honest wallet refuses to spend a coin it already marked spent and
+    // returns false.
+    bool pay(WalletCoin& wc, const std::string& receiver_id, const std::string& time,
+             const std::string& nonce, BigInt& y_out) const {
+        if (wc.spent) return false;
+        BigInt x = HashUtils::hash_challenge(receiver_id, time, nonce, q_);
+        y_out = Schnorr::respond(wc.a, wc.s, x, q_);
+        wc.spent = true;
+        return true;
     }
 
 private:
