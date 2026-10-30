@@ -92,7 +92,7 @@
     <section class="card">
       <h2>My coins <small>stored locally on this machine</small></h2>
       <table>
-        <thead><tr><th>#</th><th>Value</th><th>Serial</th><th>Status</th></tr></thead>
+        <thead><tr><th>#</th><th>Value</th><th>Serial</th><th>Status</th><th></th></tr></thead>
         <tbody id="coins"></tbody>
       </table>
       <p class="muted hidden" id="nocoins">No coins yet. Generate one below.</p>
@@ -114,6 +114,7 @@
         <input type="checkbox" id="force"><label for="force" style="margin:0;color:inherit">Demo: allow re-spending an already spent coin (double spend)</label>
       </div>
       <div class="row" style="margin-top:12px"><button class="primary" id="send">Send payment</button></div>
+      <p class="muted" style="font-size:13px;margin:8px 0 0">You can pay yourself: redeem the payment afterwards and the coin's value returns to your bank balance.</p>
       <div class="log" id="tlog"><span class="muted">Protocol steps appear here.</span></div>
     </section>
 
@@ -138,6 +139,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let busy = false;
+let me = '';
 
 function el(tag, attrs, ...kids) {
   const e = document.createElement(tag);
@@ -173,6 +175,7 @@ function render(s) {
   $('logout').classList.toggle('hidden', !loggedIn);
   if (!loggedIn) return;
 
+  me = s.username;
   $('who').textContent = '';
   $('who').append('signed in as ', el('b', {}, s.username));
   $('balance').textContent = '';
@@ -194,7 +197,8 @@ function render(s) {
       el('td', {}, String(c.id)),
       el('td', {}, String(c.denomination)),
       el('td', { class: 'mono' }, c.serial.slice(0, 10) + '…'),
-      el('td', {}, c.spent ? chip('spent', 'warn') : chip('unspent', 'ok'))));
+      el('td', {}, c.spent ? chip('spent', 'warn') : chip('unspent', 'ok')),
+      el('td', {}, c.spent ? '' : el('button', { onclick: () => deposit(c.id) }, 'Deposit'))));
   }
   $('nocoins').classList.toggle('hidden', s.coins.length > 0);
 
@@ -258,6 +262,25 @@ function redeem(id) {
     const r = await api('/api/redeem', 'POST', id === undefined ? {} : { id });
     if (!r.results.length) { toast('Nothing to redeem'); return; }
     toast(r.results.map(x => x.amount + ': ' + x.status).join(', '));
+  });
+}
+
+// Deposit = pay the coin to yourself, then redeem that payment. The bank sees
+// an ordinary payment and an ordinary redeem, so its double-spend checks apply
+// exactly as for any other coin.
+function deposit(coinId) {
+  guarded(async () => {
+    const t = await api('/api/transfer', 'POST', { to: me, coin_id: coinId });
+    if (!t.ok) throw new Error(t.message);
+    const st = await api('/api/state');
+    const mine = st.received.filter((r) => r.from === st.username && r.status === 'pending')
+      .sort((a, b) => b.id - a.id)[0];
+    if (!mine) throw new Error('the payment to yourself did not arrive');
+    const r = await api('/api/redeem', 'POST', { id: mine.id });
+    const res = r.results[0];
+    toast(res && res.status === 'accepted'
+      ? 'Deposited: ' + res.amount + ' returned to your bank balance'
+      : 'Deposit result: ' + (res ? res.status + (res.detail ? ' (' + res.detail + ')' : '') : 'nothing redeemed'));
   });
 }
 

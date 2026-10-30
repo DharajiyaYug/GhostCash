@@ -68,6 +68,8 @@ create an account in each (new accounts get a simulated balance of 100), then:
 2. **Transfer** it to wallet B's username (B must be signed in: the payment is
    interactive). The protocol steps are shown live.
 3. In wallet B, **Redeem** the received payment: B's bank balance goes up.
+   (You can also pay yourself; redeeming that payment returns the coin's value
+   to your bank balance.)
 4. To demo a double spend: in A, generate a coin, pay it to B, then tick
    *allow re-spending an already spent coin* and pay the same coin to a third
    user C (a third wallet: `./build/wallet_agent --port 8083 --data demo-data/wallet-c`).
@@ -127,6 +129,13 @@ tests; `scripts/e2e.py` is the end-to-end test.
   denomination could be correlated by an operator who logs it.
 - **RNG.** GMP's Mersenne Twister, seeded from OS entropy; not a CSPRNG.
 - **Plain HTTP.** No TLS yet; use only on localhost.
+- **Coins live on the device.** A wallet's coins and secrets are in a local
+  SQLite file per username (in the agent's `--data` directory). Logging in as the
+  same user from another machine, or another wallet with a different data
+  directory, does not bring the coins along; there is no backup or sync yet.
+- **Sessions are in memory.** Restarting the app server signs every wallet out;
+  accounts and local coins are unaffected. Usernames may contain capital letters
+  but are unique ignoring case.
 - **Wallet secrets are stored unencrypted** in the local SQLite file.
 - Group generation is not the verifiable seeded FIPS 186 procedure.
 - Coins are single-use: a received payment is redeemed, not re-spent.
