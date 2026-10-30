@@ -46,7 +46,7 @@ int main() {
     std::cout << "    Wallet unblinds signature -> coin ready\n\n";
 
     std::cout << "[4] Verifying issued coin...\n";
-    BigInt m_check = HashUtils::hash_coin_identifier(coin.serial, coin.A, coin.S);
+    BigInt m_check = HashUtils::coin_message(coin.serial, coin.A, coin.S, bank.public_modulus(coin.denomination));
     bool valid = bank.verify(coin.denomination, m_check, coin.signature);
     std::cout << "    Signature valid: " << (valid ? "YES" : "NO") << "\n\n";
 

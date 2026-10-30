@@ -47,7 +47,7 @@ TEST_CASE("Bank+Wallet: honest issuance produces a verifiable coin", "[bank_wall
     BigInt blind_sig = f.bank.blind_sign(kDefaultDenomination, blinded_m);
     Coin coin = f.wallet.unblind(f.bank, pending, blind_sig);
 
-    BigInt m_check = HashUtils::hash_coin_identifier(coin.serial, coin.A, coin.S);
+    BigInt m_check = HashUtils::coin_message(coin.serial, coin.A, coin.S, f.bank.public_modulus(coin.denomination));
     REQUIRE(f.bank.verify(coin.denomination, m_check, coin.signature));
 }
 
@@ -136,14 +136,16 @@ TEST_CASE("Denominations: a coin only verifies against the denomination it was a
 
     REQUIRE(coin.denomination == 5);
 
-    BigInt m_check = HashUtils::hash_coin_identifier(coin.serial, coin.A, coin.S);
+    // Each denomination's key signs a full-domain hash into its own Z_n.
+    BigInt m_as_5 = HashUtils::coin_message(coin.serial, coin.A, coin.S, bank.public_modulus(5));
+    BigInt m_as_1 = HashUtils::coin_message(coin.serial, coin.A, coin.S, bank.public_modulus(1));
 
     // Verifies correctly against denomination 5's key...
-    REQUIRE(bank.verify(5, m_check, coin.signature));
+    REQUIRE(bank.verify(5, m_as_5, coin.signature));
     // ...but NOT against denomination 1's key, even though it's the same
     // bank and the same coin -- a merchant who mistakenly (or maliciously)
     // checks it as a "1" must reject it.
-    REQUIRE_FALSE(bank.verify(1, m_check, coin.signature));
+    REQUIRE_FALSE(bank.verify(1, m_as_1, coin.signature));
 }
 
 TEST_CASE("Attack simulation: tampering with the serial after issuance is caught", "[bank_wallet][attack]") {
@@ -157,7 +159,8 @@ TEST_CASE("Attack simulation: tampering with the serial after issuance is caught
     Coin tampered = coin;
     tampered.serial += "00"; // attacker mutates the serial post-issuance
 
-    BigInt m_tampered = HashUtils::hash_coin_identifier(tampered.serial, tampered.A, tampered.S);
+    BigInt m_tampered = HashUtils::coin_message(tampered.serial, tampered.A, tampered.S,
+                                                f.bank.public_modulus(tampered.denomination));
     REQUIRE_FALSE(f.bank.verify(tampered.denomination, m_tampered, tampered.signature));
 }
 
@@ -172,7 +175,8 @@ TEST_CASE("Attack simulation: tampering with commitment A after issuance is caug
     Coin tampered = coin;
     tampered.A = BigInt::add(tampered.A, BigInt(1)); // attacker swaps in a different commitment
 
-    BigInt m_tampered = HashUtils::hash_coin_identifier(tampered.serial, tampered.A, tampered.S);
+    BigInt m_tampered = HashUtils::coin_message(tampered.serial, tampered.A, tampered.S,
+                                                f.bank.public_modulus(tampered.denomination));
     REQUIRE_FALSE(f.bank.verify(tampered.denomination, m_tampered, tampered.signature));
 }
 
@@ -190,7 +194,7 @@ TEST_CASE("Attack simulation: replaying another coin's signature on a new serial
     // without the bank's private key).
     Coin forged{"attacker-chosen-serial", real_coin.A, real_coin.S, real_coin.signature, real_coin.denomination};
 
-    BigInt m_forged = HashUtils::hash_coin_identifier(forged.serial, forged.A, forged.S);
+    BigInt m_forged = HashUtils::coin_message(forged.serial, forged.A, forged.S, f.bank.public_modulus(forged.denomination));
     REQUIRE_FALSE(f.bank.verify(forged.denomination, m_forged, forged.signature));
 }
 
@@ -204,7 +208,7 @@ TEST_CASE("Attack simulation: signature from a different bank is rejected", "[ba
     BigInt blind_sig = f.bank.blind_sign(kDefaultDenomination, blinded_m);
     Coin coin = f.wallet.unblind(f.bank, pending, blind_sig);
 
-    BigInt m_check = HashUtils::hash_coin_identifier(coin.serial, coin.A, coin.S);
+    BigInt m_check = HashUtils::coin_message(coin.serial, coin.A, coin.S, rogue_bank.public_modulus(coin.denomination));
     // Verifying against the rogue bank's public key must fail even though
     // the coin is perfectly valid under the real bank's key.
     REQUIRE_FALSE(rogue_bank.verify(coin.denomination, m_check, coin.signature));
