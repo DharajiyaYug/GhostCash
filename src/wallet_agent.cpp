@@ -45,6 +45,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <regex>
 #include <thread>
 #include <vector>
 
@@ -159,6 +160,18 @@ std::string short_serial(const std::string& serial) { return serial.substr(0, 8)
 
 // ---- calls to the app server (caller holds ag.mu where state is touched) --
 
+// The app server no longer recognises our token (for example because it was
+// restarted): drop the login, so the UI goes back to the sign-in form instead
+// of showing errors. Caller holds ag.mu.
+void expire_session() {
+    ++ag.generation;
+    ag.username.clear();
+    ag.token.clear();
+    ag.db.reset();
+    ag.wallet.reset();
+    ag.merchant.reset();
+}
+
 json app_call(const std::string& method, const std::string& path, const json& body, int& status,
               bool with_token = true) {
     httplib::Client cli(ag.app_host, ag.app_port);
@@ -170,6 +183,7 @@ json app_call(const std::string& method, const std::string& path, const json& bo
                                            : cli.Get(path.c_str(), headers);
     if (!r) throw std::runtime_error("cannot reach the app server");
     status = r->status;
+    if (with_token && status == 401) expire_session();
     return json::parse(r->body);
 }
 
@@ -434,6 +448,10 @@ int main(int argc, char** argv) {
             if (status == 200) balance = r.at("balance");
         } catch (const std::exception&) {
         }
+        if (ag.username.empty()) { // the app server dropped our session
+            reply(res, 200, json{{"logged_in", false}});
+            return;
+        }
 
         json coins = json::array();
         for (const auto& r : ag.db->query("SELECT id, denom, serial, spent, created FROM coins ORDER BY id")) {
@@ -496,9 +514,25 @@ int main(int argc, char** argv) {
         std::string coin_id = std::to_string(body.at("coin_id").get<long long>());
         bool force = body.value("force", false);
 
-        if (to == ag.username) {
-            fail(res, 400, "you cannot pay yourself");
+        // Usernames are case-insensitive: resolve to the receiver's registered
+        // spelling, which is also the id the challenge is bound to. Paying
+        // yourself is allowed (it moves a coin back into your bank balance).
+        if (!std::regex_match(to, std::regex("[A-Za-z0-9_]{1,20}"))) {
+            fail(res, 400, "invalid username");
             return;
+        }
+        {
+            int lookup_status = 0;
+            json info = app_call("GET", "/users/" + to, json(), lookup_status);
+            if (lookup_status != 200 || !info.value("exists", false)) {
+                fail(res, 404, "unknown user: " + to);
+                return;
+            }
+            to = info.at("username").get<std::string>();
+            if (!info.value("online", false)) {
+                fail(res, 409, to + " is offline");
+                return;
+            }
         }
         auto rows = ag.db->query("SELECT id, coin_json, a, s, spent FROM coins WHERE id=?", {coin_id});
         if (rows.empty()) {
