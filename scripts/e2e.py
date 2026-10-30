@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BUILD = os.path.join(ROOT, "build")
+BUILD = os.environ.get("E2E_BUILD", os.path.join(ROOT, "build"))  # E2E_BUILD: run against another set of binaries
 UI = os.path.join(ROOT, "ui")
 
 BANK_PORT, APP_PORT = 19000, 18000
