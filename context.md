@@ -2,7 +2,7 @@
 
 Purpose of this file: hand this to a fresh Claude (or a new teammate) so they can continue the project without having seen any earlier conversation. It describes what exists, how every part works, exactly what is sent on the wire, how to build/run/test it, which decisions are made, and which are still open.
 
-Last updated against `main` at commit `ee5fc42`. Everything described as "built" is in that commit and was verified: 74 unit test cases (376 assertions) pass, and `scripts/e2e.py` passes (about 45 checks).
+Last updated against `main` (commit hashes changed once when the history was rewritten to remove co-author lines; the file contents are the same as before). Everything described as "built" is in that commit and was verified: 74 unit test cases (376 assertions) pass, and `scripts/e2e.py` passes (about 45 checks).
 
 ---
 
@@ -13,6 +13,7 @@ Last updated against `main` at commit `ee5fc42`. Everything described as "built"
 - **Never bring up a "TA" or instructor review.** They were annoyed by it. Do not suggest checking anything with a TA.
 - They said: skip web-dev concerns (two devices logged in at once, scaling, large-user hosting). The goal is a complete, working, impressive end-to-end demonstration of the cryptography on one laptop.
 - Git: they authorised pushing **straight to `main`** (no feature branches needed). The remote is `https://github.com/DharajiyaYug/GhostCash`. A teammate also merges PRs on GitHub; always `git pull` (merge) before pushing.
+- **No Claude attribution anywhere in git.** Do not add co-author trailers or "Generated with" lines to commits or PRs. The user saw "claude" in GitHub's Contributors list and asked for it removed; the nine commits carrying the trailer were rewritten and `main` was force-pushed (new commit hashes from the first rewritten commit onward). Teammates with older clones must run `git fetch` then `git reset --hard origin/main`.
 - Be honest about what is and is not verified. Say so plainly if something wasn't run.
 - When something is meant for teammates, start the message with one line naming the audience.
 - A page-style "team discussion" document was started but **not published**; the user asked for the list in chat instead (section 13 has the list).
@@ -459,7 +460,7 @@ Highest priority first (the user wants these written simply for teammates who mi
 ## 14. Practical notes for a new Claude session in this repo
 
 - Do all builds/tests/runs in WSL (`wsl -d Ubuntu -- bash -lc 'cd /mnt/c/IITK/CS670/project && ...'`). Background processes started inside one `wsl` command die when it exits; to keep a stack alive for a browser test, run it in a long-lived background job.
-- Use **Windows git** (from the Bash tool) for commits. WSL's git shows every file as modified because of CRLF/LF differences. Git identity configured: `bikkygill05` / `bsingh23@iitk.ac.in`. Commit messages end with the line `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
+- Use **Windows git** (from the Bash tool) for commits. WSL's git shows every file as modified because of CRLF/LF differences. Git identity configured: `bikkygill05` / `bsingh23@iitk.ac.in`. **Do not add `Co-Authored-By: Claude ...` or "Generated with Claude" lines** to commits or PR descriptions: the user does not want Claude listed as a contributor on GitHub (the trailers were stripped from history once and `main` was force-pushed; see section 0).
 - Windows git has `core.autocrlf=true`; `.gitattributes` pins LF for scripts and the Makefile (they must stay LF to run under WSL).
 - When editing files via Python snippets, a literal two-character `\n` in a heredoc can get collapsed by the tool; use a placeholder and replace with `chr(92)+'n'`.
 - Headless Chrome UI tests: Chrome at `C:\Program Files\Google\Chrome\Application\chrome.exe`, `puppeteer-core` installed in a scratch folder; use **one browser instance per wallet page** (a background tab never gets frames and hangs on type/click).
