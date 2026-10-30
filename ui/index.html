@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GhostCash Wallet</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #1b1f27; --muted: #667085; --line: #e3e6ec;
+    --accent: #3b5bdb; --accent-ink: #ffffff; --ok: #1a7f4b; --bad: #c92a2a; --warn: #b26a00;
+    --chip: #eef1f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --card: #1b2029; --ink: #e8ebf1; --muted: #98a2b3; --line: #2b3240;
+      --accent: #748ffc; --accent-ink: #10131a; --ok: #51cf8a; --bad: #ff8787; --warn: #ffc078;
+      --chip: #242b38;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 24px;
+           background: var(--card); border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: .3px; }
+  header .spacer { flex: 1; }
+  header .stat { color: var(--muted); }
+  header .stat b { color: var(--ink); }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 48px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .card h2 { margin: 0 0 12px; font-size: 15px; }
+  .card h2 small { color: var(--muted); font-weight: normal; margin-left: 6px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input[type=text], input[type=password], select {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--bg); color: var(--ink); font: inherit; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--chip); color: var(--ink);
+           padding: 7px 14px; border-radius: 7px; cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button:disabled { opacity: .55; cursor: default; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .denoms button { min-width: 64px; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); font-size: 14px; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; background: var(--chip); }
+  .chip.ok { color: var(--ok); } .chip.bad { color: var(--bad); } .chip.warn { color: var(--warn); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  .muted { color: var(--muted); }
+  .log { margin-top: 10px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line);
+         border-radius: 7px; min-height: 40px; font-size: 13px; }
+  .log div { padding: 2px 0; }
+  .log .good { color: var(--ok); } .log .err { color: var(--bad); }
+  .hist { max-height: 260px; overflow: auto; font-size: 13px; }
+  .hist div { padding: 3px 0; border-bottom: 1px solid var(--line); }
+  .hist time { color: var(--muted); margin-right: 8px; }
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); padding: 9px 16px;
+           border-radius: 8px; background: var(--ink); color: var(--bg); display: none; max-width: 90vw; }
+  #auth { max-width: 380px; margin: 48px auto; }
+  .hidden { display: none !important; }
+  .malicious { margin-top: 10px; display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--warn); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>GhostCash</h1>
+  <span class="muted">wallet</span>
+  <span class="spacer"></span>
+  <span class="stat hidden" id="who"></span>
+  <span class="stat hidden" id="balance"></span>
+  <button class="hidden" id="logout">Log out</button>
+</header>
+
+<main>
+  <section id="auth" class="card hidden">
+    <h2>Sign in</h2>
+    <label for="u">Username</label>
+    <input type="text" id="u" autocomplete="username" placeholder="alice">
+    <label for="p">Password</label>
+    <input type="password" id="p" autocomplete="current-password">
+    <div class="row" style="margin-top:14px">
+      <button class="primary" id="login">Sign in</button>
+      <button id="signup">Create account</button>
+    </div>
+    <p class="muted" style="font-size:13px">New accounts start with a simulated bank balance. Your coins and secrets stay on this machine.</p>
+  </section>
+
+  <div id="app" class="grid hidden">
+    <section class="card">
+      <h2>My coins <small>stored locally on this machine</small></h2>
+      <table>
+        <thead><tr><th>#</th><th>Value</th><th>Serial</th><th>Status</th></tr></thead>
+        <tbody id="coins"></tbody>
+      </table>
+      <p class="muted hidden" id="nocoins">No coins yet. Generate one below.</p>
+    </section>
+
+    <section class="card">
+      <h2>Generate coin <small>withdraw from your bank balance</small></h2>
+      <div class="row denoms" id="denoms"></div>
+      <p class="muted" style="font-size:13px">The coin is created and blinded on this machine. The bank signs it without seeing it.</p>
+    </section>
+
+    <section class="card">
+      <h2>Transfer <small>pay a coin to another user</small></h2>
+      <label for="to">Pay to (username)</label>
+      <input type="text" id="to" placeholder="bob">
+      <label for="coin">Coin</label>
+      <select id="coin"></select>
+      <div class="malicious">
+        <input type="checkbox" id="force"><label for="force" style="margin:0;color:inherit">Demo: allow re-spending an already spent coin (double spend)</label>
+      </div>
+      <div class="row" style="margin-top:12px"><button class="primary" id="send">Send payment</button></div>
+      <div class="log" id="tlog"><span class="muted">Protocol steps appear here.</span></div>
+    </section>
+
+    <section class="card">
+      <h2>Received payments <small>redeem to credit your bank balance</small></h2>
+      <div class="row" style="margin-bottom:8px"><button id="redeemall">Redeem all</button></div>
+      <table>
+        <thead><tr><th>From</th><th>Value</th><th>Status</th><th></th></tr></thead>
+        <tbody id="received"></tbody>
+      </table>
+      <p class="muted hidden" id="norecv">Nothing received yet.</p>
+    </section>
+
+    <section class="card" style="grid-column: 1 / -1">
+      <h2>History</h2>
+      <div class="hist" id="history"></div>
+    </section>
+  </div>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let busy = false;
+
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === 'class') e.className = v; else if (k === 'onclick') e.onclick = v; else e.setAttribute(k, v);
+  }
+  for (const k of kids) e.append(k);
+  return e;
+}
+
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toast.h); toast.h = setTimeout(() => { t.style.display = 'none'; }, 4000);
+}
+
+async function api(path, method, body) {
+  const r = await fetch(path, { method: method || 'GET',
+    headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  let data = {};
+  try { data = await r.json(); } catch (e) { /* non-JSON reply */ }
+  if (!r.ok) throw new Error(data.error || ('request failed (' + r.status + ')'));
+  return data;
+}
+
+function chip(text, cls) { return el('span', { class: 'chip ' + (cls || '') }, text); }
+
+function render(s) {
+  const loggedIn = s.logged_in;
+  $('auth').classList.toggle('hidden', loggedIn);
+  $('app').classList.toggle('hidden', !loggedIn);
+  $('who').classList.toggle('hidden', !loggedIn);
+  $('balance').classList.toggle('hidden', !loggedIn);
+  $('logout').classList.toggle('hidden', !loggedIn);
+  if (!loggedIn) return;
+
+  $('who').textContent = '';
+  $('who').append('signed in as ', el('b', {}, s.username));
+  $('balance').textContent = '';
+  $('balance').append('bank balance ', el('b', {}, s.bank_balance === null ? '?' : String(s.bank_balance)));
+
+  // denominations (rebuild only when they change)
+  const denomKey = s.denominations.join(',');
+  if ($('denoms').dataset.key !== denomKey) {
+    $('denoms').dataset.key = denomKey; $('denoms').textContent = '';
+    for (const d of s.denominations) {
+      $('denoms').append(el('button', { class: 'primary', onclick: () => generate(d) }, 'Generate ' + d));
+    }
+  }
+
+  // coins
+  const tbody = $('coins'); tbody.textContent = '';
+  for (const c of s.coins) {
+    tbody.append(el('tr', {},
+      el('td', {}, String(c.id)),
+      el('td', {}, String(c.denomination)),
+      el('td', { class: 'mono' }, c.serial.slice(0, 10) + '…'),
+      el('td', {}, c.spent ? chip('spent', 'warn') : chip('unspent', 'ok'))));
+  }
+  $('nocoins').classList.toggle('hidden', s.coins.length > 0);
+
+  // coin selector (keep selection while polling)
+  const sel = $('coin'); const keep = sel.value; const force = $('force').checked;
+  const usable = s.coins.filter(c => force || !c.spent);
+  const sig = usable.map(c => c.id + ':' + c.spent).join(',');
+  if (sel.dataset.sig !== sig) {
+    sel.dataset.sig = sig; sel.textContent = '';
+    for (const c of usable) {
+      sel.append(el('option', { value: String(c.id) },
+        '#' + c.id + ' — value ' + c.denomination + (c.spent ? ' (spent)' : '')));
+    }
+    if (usable.some(c => String(c.id) === keep)) sel.value = keep;
+  }
+
+  // received payments
+  const rb = $('received'); rb.textContent = '';
+  for (const r of s.received) {
+    const cls = r.status === 'redeemed' ? 'ok' : (r.status === 'rejected' ? 'bad' : 'warn');
+    const action = r.status === 'pending'
+      ? el('button', { onclick: () => redeem(r.id) }, 'Redeem') : el('span', { class: 'muted' }, r.note || '');
+    rb.append(el('tr', {}, el('td', {}, r.from), el('td', {}, String(r.amount)),
+      el('td', {}, chip(r.status, cls)), el('td', {}, action)));
+  }
+  $('norecv').classList.toggle('hidden', s.received.length > 0);
+
+  // history
+  const h = $('history'); h.textContent = '';
+  for (const e of s.history) {
+    h.append(el('div', {}, el('time', { class: 'muted' }, e.ts.replace('T', ' ').replace('Z', '')),
+      chip(e.kind), ' ' + e.detail));
+  }
+}
+
+async function refresh() {
+  if (busy) return;
+  try { render(await api('/api/state')); } catch (e) { /* agent restarting; try again */ }
+}
+
+async function guarded(fn) {
+  if (busy) return;
+  busy = true;
+  try { await fn(); } catch (e) { toast(e.message); } finally { busy = false; }
+  refresh();
+}
+
+async function authenticate(path) {
+  await guarded(async () => {
+    await api(path, 'POST', { username: $('u').value.trim(), password: $('p').value });
+    $('p').value = '';
+  });
+}
+
+function generate(d) {
+  guarded(async () => { await api('/api/generate', 'POST', { denomination: d }); toast('Generated a ' + d + '-coin'); });
+}
+
+function redeem(id) {
+  guarded(async () => {
+    const r = await api('/api/redeem', 'POST', id === undefined ? {} : { id });
+    if (!r.results.length) { toast('Nothing to redeem'); return; }
+    toast(r.results.map(x => x.amount + ': ' + x.status).join(', '));
+  });
+}
+
+function logLines(lines, ok) {
+  const box = $('tlog'); box.textContent = '';
+  lines.forEach((l, i) => {
+    const last = i === lines.length - 1;
+    box.append(el('div', { class: last ? (ok ? 'good' : 'err') : '' }, (i + 1) + '. ' + l));
+  });
+}
+
+$('login').onclick = () => authenticate('/api/login');
+$('signup').onclick = () => authenticate('/api/signup');
+$('logout').onclick = () => guarded(async () => { await api('/api/logout', 'POST'); });
+$('redeemall').onclick = () => redeem();
+$('force').onchange = () => { $('coin').dataset.sig = ''; refresh(); };
+$('p').addEventListener('keydown', (e) => { if (e.key === 'Enter') authenticate('/api/login'); });
+
+$('send').onclick = () => guarded(async () => {
+  const to = $('to').value.trim(); const coin = $('coin').value;
+  if (!to) throw new Error('enter a username to pay');
+  if (!coin) throw new Error('no coin selected');
+  $('tlog').textContent = 'Waiting for ' + to + '…';
+  try {
+    const r = await api('/api/transfer', 'POST', { to, coin_id: Number(coin), force: $('force').checked });
+    logLines(r.steps, r.ok);
+  } catch (e) {
+    $('tlog').textContent = ''; $('tlog').append(el('div', { class: 'err' }, e.message));
+    throw e;
+  }
+});
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

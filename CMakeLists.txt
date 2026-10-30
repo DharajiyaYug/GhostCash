@@ -103,6 +103,26 @@ target_link_libraries(run_tests PRIVATE GMP::GMP OpenSSL::Crypto)
 enable_testing()
 add_test(NAME ghostcash_unit_tests COMMAND run_tests)
 
+# ---------------------------------------------------------------------------
+# Networked programs: bank server, app server, wallet agent.
+# Header-only HTTP (cpp-httplib) and JSON (nlohmann) live under third_party/.
+# The wallet agent also links SQLite for its local coin store.
+# ---------------------------------------------------------------------------
+
+find_package(Threads REQUIRED)
+find_package(SQLite3 REQUIRED)
+
+set(GHOSTCASH_NET_HEADERS src/net_common.hpp third_party/httplib.h third_party/nlohmann/json.hpp)
+
+foreach(prog bank_server app_server wallet_agent)
+  add_executable(${prog} src/${prog}.cpp ${GHOSTCASH_NET_HEADERS} ${GHOSTCASH_HEADERS})
+  target_include_directories(${prog} PRIVATE include)
+  target_include_directories(${prog} SYSTEM PRIVATE third_party)
+  target_link_libraries(${prog} PRIVATE GMP::GMP OpenSSL::Crypto Threads::Threads)
+  set_target_properties(${prog} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+endforeach()
+target_link_libraries(wallet_agent PRIVATE SQLite::SQLite3)
+
 # Place binaries in build/ (matching the Makefile's layout) instead of
 # scattering them across CMake's default per-target directories.
 set_target_properties(demo_issuance demo_interactive run_tests PROPERTIES
