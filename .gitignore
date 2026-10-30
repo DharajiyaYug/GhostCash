@@ -1,1 +1,6 @@
 build/
+demo-data/
+logs/
+wallet-data/
+*.db
+*.tmp
