@@ -23,5 +23,5 @@ struct Coin {
     BigInt A;           // g^a
     BigInt S;           // g^s
     BigInt signature;   // bank's signature over H(serial || A || S)
-    int denomination;   // which denomination key this was signed under
+    int denomination = 0; // which denomination key this was signed under
 };

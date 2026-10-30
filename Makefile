@@ -102,7 +102,9 @@ TEST_SRCS    := tests/test_main.cpp \
                 tests/test_group_setup.cpp \
                 tests/test_rsa_keygen.cpp \
                 tests/test_hash_utils.cpp \
-                tests/test_bank_wallet.cpp
+                tests/test_bank_wallet.cpp \
+                tests/test_zkp.cpp \
+                tests/test_clearance.cpp
 TEST_BIN     := build/run_tests
 
 .PHONY: all demo interactive test run run-interactive run-tests clean print-config
