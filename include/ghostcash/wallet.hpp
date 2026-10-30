@@ -20,6 +20,7 @@
 #include "ghostcash/coin.hpp"
 #include "ghostcash/bank.hpp"
 #include "ghostcash/hash_utils.hpp"
+#include "ghostcash/zkp.hpp"
 #include <gmp.h>
 #include <sstream>
 
@@ -33,6 +34,18 @@ struct PendingWithdrawal {
     BigInt m;        // unblinded identifier: H(serial || A || S)
     BigInt r;         // blinding factor used
     BigInt blinded_m; // m' sent to the bank
+    BigInt a, s;      // coin secrets, kept so the wallet can answer challenges
+    BigInt tag;       // T = H(a || s), sent to the bank alongside m'
+};
+
+// A coin as the wallet holds it: the public coin plus the secrets a, s that
+// only the wallet knows. `spent` is the honest wallet's own bookkeeping; a
+// malicious wallet can ignore it by copying the struct (which is exactly how
+// the double-spend tests attack the bank).
+struct WalletCoin {
+    Coin coin;
+    BigInt a, s;
+    bool spent = false;
 };
 
 class Wallet {
@@ -72,7 +85,9 @@ public:
         BigInt r_e = BigInt::powmod(r, e, n);
         BigInt blinded_m = BigInt::mulmod(m_mod_n, r_e, n);
 
-        out_pending = PendingWithdrawal{denomination, serial, A, S, m_mod_n, r, blinded_m};
+        BigInt tag = HashUtils::hash_tag(a, s);
+
+        out_pending = PendingWithdrawal{denomination, serial, A, S, m_mod_n, r, blinded_m, a, s, tag};
         return blinded_m;
     }
 
@@ -85,6 +100,29 @@ public:
         BigInt signature = BigInt::mulmod(blind_signature, r_inv, n);
 
         return Coin{pending.serial, pending.A, pending.S, signature, pending.denomination};
+    }
+
+    // Same as unblind(), but keeps the secrets a, s with the coin so it can
+    // later be spent.
+    WalletCoin finish_withdrawal(const Bank& bank, const PendingWithdrawal& pending, const BigInt& blind_signature) const {
+        return WalletCoin{unblind(bank, pending, blind_signature), pending.a, pending.s, false};
+    }
+
+    // Answers a receiver's challenge for `wc`, writing the response to
+    // `y_out`. The challenge is re-derived here from (receiver_id, time,
+    // nonce) instead of being accepted as a bare number: the wallet only
+    // ever answers a challenge bound to the receiver it actually means to
+    // pay, so a challenge relayed from somebody else can't be answered.
+    //
+    // An honest wallet refuses to spend a coin it already marked spent and
+    // returns false.
+    bool pay(WalletCoin& wc, const std::string& receiver_id, const std::string& time,
+             const std::string& nonce, BigInt& y_out) const {
+        if (wc.spent) return false;
+        BigInt x = HashUtils::hash_challenge(receiver_id, time, nonce, q_);
+        y_out = Schnorr::respond(wc.a, wc.s, x, q_);
+        wc.spent = true;
+        return true;
     }
 
 private:

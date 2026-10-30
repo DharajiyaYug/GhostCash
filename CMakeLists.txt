@@ -93,6 +93,8 @@ add_executable(run_tests
   tests/test_rsa_keygen.cpp
   tests/test_hash_utils.cpp
   tests/test_bank_wallet.cpp
+  tests/test_zkp.cpp
+  tests/test_clearance.cpp
   ${GHOSTCASH_HEADERS}
 )
 target_include_directories(run_tests PRIVATE include tests)

@@ -34,17 +34,43 @@
 #pragma once
 
 #include "ghostcash/bigint.hpp"
+#include "ghostcash/group_setup.hpp"
+#include "ghostcash/hash_utils.hpp"
 #include "ghostcash/rsa_keygen.hpp"
+#include "ghostcash/transcript.hpp"
+#include "ghostcash/zkp.hpp"
 #include <gmp.h>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+// Outcome of redeeming a transcript at the bank.
+enum class DepositStatus {
+    Accepted,    // new coin: stored, receiver credited
+    Duplicate,   // exactly the same transcript again (resubmission); nobody accused
+    DoubleSpend, // same coin, different challenge: secrets extracted
+    Invalid      // signature, proof, receiver or serial check failed
+};
+
+struct DepositResult {
+    DepositStatus status = DepositStatus::Invalid;
+    std::string detail;          // why a transcript was rejected, or a note
+    std::string flagged_account; // DoubleSpend: the account the tag traced to ("" if untraceable)
+    BigInt a, s;                 // DoubleSpend: the extracted coin secrets
+};
+
 class Bank {
 public:
     Bank() = default;
+
+    // The public group (p, q, g), needed to verify proofs at deposit time.
+    void set_group(GroupParams group) {
+        group_ = std::move(group);
+        has_group_ = true;
+    }
 
     // Registers a new denomination, generating a fresh, independent RSA
     // keypair for it on the spot. Each denomination's keypair is completely
@@ -105,6 +131,106 @@ public:
         return lhs == rhs;
     }
 
+    // Full withdrawal: debits `user` for the denomination, logs the tag
+    // T = H(a || s) against that account, and blind-signs. The tag is the
+    // only link between this account and the coin: it is a hash of secrets
+    // that never appear in the coin, so it says nothing about the coin until
+    // a double spend reveals a and s (see deposit()).
+    //
+    // Everything that can be rejected is checked before the account is
+    // touched, so a failed withdrawal neither debits nor logs. A tag already
+    // in the log is rejected: two coins sharing a tag would make tracing
+    // ambiguous.
+    //
+    // Trust note: in this simple mode the bank cannot check that the tag
+    // really is H(a || s) for the coin being signed (it only sees the blinded
+    // m'). A wallet that lies about its tag cannot be traced. A cut-and-choose
+    // extension would close that; see DESIGN.md.
+    BigInt withdraw(const std::string& user, int denomination,
+                    const BigInt& blinded_message, const BigInt& tag) {
+        if (!has_denomination(denomination)) {
+            throw std::invalid_argument("Bank: unknown denomination");
+        }
+        if (tag_log_.count(tag.to_string(16))) {
+            throw std::invalid_argument("Bank: withdrawal tag already used");
+        }
+        debit(user, denomination); // throws on unknown account / insufficient balance
+        tag_log_[tag.to_string(16)] = user;
+        return blind_sign(denomination, blinded_message);
+    }
+
+    // Redeems a transcript. Checks the bank signature, the proof (against the
+    // challenge recomputed for the named receiver) and the receiver account,
+    // then consults the spent-coin database keyed by serial:
+    //   - unseen serial: store the transcript, credit the receiver.
+    //   - same coin, same challenge: Duplicate (a resubmission; no accusation).
+    //   - same coin, different challenge: DoubleSpend. The two responses give
+    //     a and s; H(a || s) is looked up in the withdrawal log to find the
+    //     account to flag. The second depositor is not credited.
+    DepositResult deposit(const Transcript& t) {
+        if (!has_group_) throw std::logic_error("Bank: group parameters not set");
+
+        const Coin& c = t.coin;
+        if (!has_denomination(c.denomination)) return rejected("unknown denomination");
+
+        BigInt m = HashUtils::hash_coin_identifier(c.serial, c.A, c.S);
+        if (!verify(c.denomination, m, c.signature)) return rejected("bad bank signature");
+
+        BigInt x = t.challenge(group_.q);
+        if (!Schnorr::verify(group_, c.A, c.S, x, t.y)) return rejected("bad proof");
+
+        auto it = spent_.find(c.serial);
+        if (it == spent_.end()) {
+            if (!balances_.count(t.receiver_id)) return rejected("unknown receiver account");
+            spent_.emplace(c.serial, t);
+            balances_[t.receiver_id] += c.denomination;
+            DepositResult ok;
+            ok.status = DepositStatus::Accepted;
+            return ok;
+        }
+
+        const Transcript& prev = it->second;
+        if (prev.coin.A != c.A || prev.coin.S != c.S) {
+            return rejected("serial already used by a different coin");
+        }
+
+        BigInt prev_x = prev.challenge(group_.q);
+        if (prev_x == x) {
+            DepositResult dup;
+            dup.status = DepositStatus::Duplicate;
+            dup.detail = "transcript already redeemed";
+            return dup;
+        }
+
+        BigInt a, s;
+        if (!Schnorr::extract(group_, prev_x, prev.y, x, t.y, a, s)) {
+            return rejected("could not extract secrets");
+        }
+        // Both transcripts verified, so this must hold; checked anyway so a
+        // bank bug can never accuse anyone on bad arithmetic.
+        if (BigInt::powmod(group_.g, a, group_.p) != c.A ||
+            BigInt::powmod(group_.g, s, group_.p) != c.S) {
+            return rejected("extracted secrets inconsistent with coin");
+        }
+
+        DepositResult r;
+        r.status = DepositStatus::DoubleSpend;
+        r.a = a;
+        r.s = s;
+        auto tag_it = tag_log_.find(HashUtils::hash_tag(a, s).to_string(16));
+        if (tag_it != tag_log_.end()) {
+            r.flagged_account = tag_it->second;
+            flagged_.insert(tag_it->second);
+        } else {
+            r.detail = "double spend detected but the tag is not in the withdrawal log";
+        }
+        return r;
+    }
+
+    bool is_flagged(const std::string& user) const { return flagged_.count(user) != 0; }
+    const std::set<std::string>& flagged_accounts() const { return flagged_; }
+    size_t spent_count() const { return spent_.size(); }
+
     // ---- simulated account ledger --------------------------------
     //
     // Deliberately minimal (a plain in-memory map of user id -> integer
@@ -151,6 +277,19 @@ private:
         return it->second;
     }
 
+    static DepositResult rejected(std::string why) {
+        DepositResult r;
+        r.status = DepositStatus::Invalid;
+        r.detail = std::move(why);
+        return r;
+    }
+
     std::map<int, RSAKeyPair> keys_;
     std::map<std::string, int> balances_;
+
+    GroupParams group_;
+    bool has_group_ = false;
+    std::map<std::string, std::string> tag_log_;  // hex(T) -> withdrawing account
+    std::map<std::string, Transcript> spent_;     // serial -> first redeemed transcript
+    std::set<std::string> flagged_;               // accounts traced to a double spend
 };
