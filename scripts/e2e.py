@@ -29,7 +29,9 @@ BUILD = os.path.join(ROOT, "build")
 UI = os.path.join(ROOT, "ui")
 
 BANK_PORT, APP_PORT = 19000, 18000
-WALLET_PORTS = {"alice": 18081, "bob": 18082, "carol": 18083}
+WALLET_PORTS = {"alice": 18081, "bob": 18082, "carol": 18083, "erin": 18084}
+# wallet key -> registered username, where they differ (capital letters are allowed)
+USERNAMES = {"erin": "Erin"}
 INTERNAL_KEY = "e2e-internal-key"
 
 procs = []
@@ -108,9 +110,13 @@ def main():
 
     try:
         bank = start_bank(tmp, logdir)
-        start("app", [os.path.join(BUILD, "app_server"), "--port", str(APP_PORT), "--bank-port", str(BANK_PORT),
-                      "--key", INTERNAL_KEY, "--users", os.path.join(tmp, "users.json")], logdir)
-        wait_up(APP_PORT)
+        def start_app():
+            p = start("app", [os.path.join(BUILD, "app_server"), "--port", str(APP_PORT), "--bank-port", str(BANK_PORT),
+                              "--key", INTERNAL_KEY, "--users", os.path.join(tmp, "users.json")], logdir)
+            wait_up(APP_PORT)
+            return p
+
+        app = start_app()
         for user, port in WALLET_PORTS.items():
             start("wallet-" + user, [os.path.join(BUILD, "wallet_agent"), "--port", str(port),
                                      "--app-port", str(APP_PORT), "--data", os.path.join(tmp, "data-" + user),
@@ -119,8 +125,9 @@ def main():
 
         print("\n[1] accounts")
         for user in WALLET_PORTS:
-            s, r = wallet(user, "/api/signup", "POST", {"username": user, "password": "pw-" + user})
-            check("signup " + user, s == 200 and r.get("username") == user, r)
+            name = USERNAMES.get(user, user)
+            s, r = wallet(user, "/api/signup", "POST", {"username": name, "password": "pw-" + user})
+            check("signup " + name, s == 200 and r.get("username") == name, r)
         check("new accounts start with 100", balance("alice") == 100)
         s, r = wallet("alice", "/api/signup", "POST", {"username": "alice", "password": "x" * 6})
         check("duplicate username rejected", s == 409, (s, r))
@@ -206,7 +213,34 @@ def main():
         check("withdrawing beyond the balance is rejected", got_error is not None
               and "insufficient" in got_error[1].get("error", ""), got_error)
 
-        print("\n[7] state survives a bank restart")
+        print("\n[7] capital letters, case-insensitive names, paying yourself")
+        s, r = http(APP_PORT, "/login", "POST", {"username": "erin", "password": "pw-erin"})
+        check("login resolves to the registered spelling", s == 200 and r.get("username") == "Erin", (s, r))
+        s, r = http(APP_PORT, "/signup", "POST", {"username": "ERIN", "password": "other1"})
+        check("a name differing only by case is taken", s == 409, (s, r))
+        s, r = http(APP_PORT, "/signup", "POST", {"username": "bad name!", "password": "pw-x"})
+        check("invalid characters are rejected", s == 400, (s, r))
+
+        s, st = wallet("alice", "/api/state")
+        one = [c for c in st["coins"] if c["denomination"] == 1 and not c["spent"]][0]["id"]
+        s, r = wallet("alice", "/api/transfer", "POST", {"to": "erin", "coin_id": one})
+        check("alice pays 'erin' (lower case) and it reaches Erin", s == 200 and r.get("ok") is True, r)
+        s, r = wallet("erin", "/api/redeem", "POST", {})
+        check("Erin redeems it", s == 200 and r["results"][0]["status"] == "accepted", r)
+        check("Erin is credited (100 + 1)", balance("erin") == 101, balance("erin"))
+
+        s, r = wallet("erin", "/api/generate", "POST", {"denomination": 5})
+        s, st = wallet("erin", "/api/state")
+        mine = [c for c in st["coins"] if c["denomination"] == 5][0]["id"]
+        before = balance("erin")
+        s, r = wallet("erin", "/api/transfer", "POST", {"to": "Erin", "coin_id": mine})
+        check("Erin pays herself", s == 200 and r.get("ok") is True, r)
+        s, r = wallet("erin", "/api/redeem", "POST", {})
+        check("the self-payment redeems and the coin value returns to her balance",
+              s == 200 and r["results"][0]["status"] == "accepted" and balance("erin") == before + 5,
+              (r, balance("erin"), before))
+
+        print("\n[8] state survives a bank restart")
         before = {u: balance(u) for u in WALLET_PORTS}
         bank.terminate()
         bank.wait()
@@ -215,6 +249,19 @@ def main():
         check("balances identical after restart", before == after, (before, after))
         s, adm = http(BANK_PORT, "/admin/state", headers={"X-Internal-Key": INTERNAL_KEY})
         check("flagged account survives restart", adm.get("flagged") == ["alice"], adm)
+
+        print("\n[9] app server restart: sessions are lost, accounts and local coins are not")
+        coins_before = len(wallet("alice", "/api/state")[1]["coins"])
+        app.terminate()
+        app.wait()
+        app = start_app()
+        s, st = wallet("alice", "/api/state")
+        check("the wallet falls back to the sign-in form", st.get("logged_in") is False, st)
+        s, r = wallet("alice", "/api/login", "POST", {"username": "ALICE", "password": "pw-alice"})
+        check("accounts survive the restart (login, any capitalisation)", s == 200 and r.get("username") == "alice", (s, r))
+        s, st = wallet("alice", "/api/state")
+        check("local coins are still there after logging back in", len(st["coins"]) == coins_before, st.get("coins"))
+        check("bank balance unchanged", balance("alice") == before["alice"], (balance("alice"), before["alice"]))
 
     finally:
         for name, p in procs:

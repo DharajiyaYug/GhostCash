@@ -21,7 +21,10 @@
 //   GET  /balance                       (token)  bank balance
 //   POST /withdraw {denomination, blinded_m, tag} (token)
 //   POST /redeem   {transcript}                  (token)
-//   GET  /users/<name>                  (token)  {exists, online}
+//   GET  /users/<name>                  (token)  {exists, online, username}
+//
+// Usernames may contain capital letters but are unique ignoring case, and
+// login/lookup resolve any spelling to the registered one.
 //   POST /transfer/send {to, type, transfer_id, payload} (token)
 //   GET  /transfer/inbox?wait=<seconds> (token)  long poll
 //
@@ -108,12 +111,29 @@ int main(int argc, char** argv) {
     {
         std::string raw;
         if (net::read_file(users_path, raw)) {
-            for (auto& [name, u] : json::parse(raw).items()) {
+            // Keep the parsed document alive for the whole loop: iterating
+            // json::parse(raw).items() directly would dangle.
+            json saved = json::parse(raw);
+            for (auto& [name, u] : saved.items()) {
                 users[name] = User{u.at("salt").get<std::string>(), u.at("hash").get<std::string>()};
             }
             std::cout << "[app] loaded " << users.size() << " users\n";
         }
     }
+
+    // The registered spelling of `name` (case-insensitive match), or "".
+    // Caller holds `mu`.
+    auto find_ci = [&](const std::string& name) -> std::string {
+        auto lower = [](std::string s) {
+            for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return s;
+        };
+        const std::string want = lower(name);
+        for (const auto& kv : users) {
+            if (lower(kv.first) == want) return kv.first;
+        }
+        return "";
+    };
 
     // Caller holds `mu`.
     auto save_users = [&]() {
@@ -183,8 +203,8 @@ int main(int argc, char** argv) {
         json body = json::parse(req.body);
         std::string username = body.at("username").get<std::string>();
         std::string password = body.at("password").get<std::string>();
-        if (!std::regex_match(username, std::regex("[a-z0-9_]{3,20}"))) {
-            fail(res, 400, "username must be 3-20 characters: a-z, 0-9, _");
+        if (!std::regex_match(username, std::regex("[A-Za-z0-9_]{3,20}"))) {
+            fail(res, 400, "username must be 3-20 characters: letters, digits or _");
             return;
         }
         if (password.size() < 4) {
@@ -194,7 +214,7 @@ int main(int argc, char** argv) {
 
         {
             std::lock_guard<std::mutex> lock(mu);
-            if (users.count(username)) {
+            if (!find_ci(username).empty()) {
                 fail(res, 409, "username taken");
                 return;
             }
@@ -232,21 +252,22 @@ int main(int argc, char** argv) {
         std::string password = body.at("password").get<std::string>();
 
         User u;
+        std::string canonical;
         {
             std::lock_guard<std::mutex> lock(mu);
-            auto it = users.find(username);
-            if (it == users.end()) {
+            canonical = find_ci(username);
+            if (canonical.empty()) {
                 fail(res, 401, "wrong username or password");
                 return;
             }
-            u = it->second;
+            u = users[canonical];
         }
         if (!same_hash(hash_password(password, u.salt_hex), u.hash_hex)) {
             fail(res, 401, "wrong username or password");
             return;
         }
-        std::cout << "[app] login: " << username << "\n";
-        reply(res, 200, json{{"token", new_session(username)}, {"username", username}});
+        std::cout << "[app] login: " << canonical << "\n";
+        reply(res, 200, json{{"token", new_session(canonical)}, {"username", canonical}});
     }));
 
     svr.Get("/params", handler(false, [&](const httplib::Request&, httplib::Response& res, const std::string&) {
@@ -285,16 +306,15 @@ int main(int argc, char** argv) {
         reply(res, status, r);
     }));
 
-    svr.Get(R"(/users/([a-z0-9_]+))", handler(true, [&](const httplib::Request& req, httplib::Response& res, const std::string&) {
-        std::string name = req.matches[1];
+    svr.Get(R"(/users/([A-Za-z0-9_]+))", handler(true, [&](const httplib::Request& req, httplib::Response& res, const std::string&) {
         std::lock_guard<std::mutex> lock(mu);
-        bool exists = users.count(name) != 0;
+        std::string name = find_ci(req.matches[1]);
         bool online = false;
         auto it = last_seen.find(name);
         if (it != last_seen.end()) {
             online = Clock::now() - it->second < std::chrono::seconds(kOnlineWindowSeconds);
         }
-        reply(res, 200, json{{"exists", exists}, {"online", online}});
+        reply(res, 200, json{{"exists", !name.empty()}, {"online", online}, {"username", name}});
     }));
 
     svr.Post("/transfer/send", handler(true, [&](const httplib::Request& req, httplib::Response& res, const std::string& user) {
@@ -308,16 +328,17 @@ int main(int argc, char** argv) {
         }
 
         std::lock_guard<std::mutex> lock(mu);
-        if (!users.count(to)) {
+        const std::string target = find_ci(to);
+        if (target.empty()) {
             fail(res, 404, "unknown user: " + to);
             return;
         }
-        auto seen = last_seen.find(to);
+        auto seen = last_seen.find(target);
         if (seen == last_seen.end() || Clock::now() - seen->second >= std::chrono::seconds(kOnlineWindowSeconds)) {
-            fail(res, 409, to + " is offline");
+            fail(res, 409, target + " is offline");
             return;
         }
-        auto& queue = inbox[to];
+        auto& queue = inbox[target];
         if (queue.size() >= kMaxQueued) {
             fail(res, 429, "receiver inbox full");
             return;
