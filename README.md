@@ -50,6 +50,7 @@ make                 # demos, unit tests, bank_server, app_server, wallet_agent
 make run-tests       # unit tests (Catch2)
 make e2e             # starts a bank, an app and 3 wallets and runs the whole scenario
 E2E_FULL=1 make e2e  # same, at the specified sizes (256-bit q, 3072-bit p, 2048-bit RSA)
+E2E_TLS=0 make e2e   # same, without TLS (TLS is on by default)
 ```
 
 CMake also works: `cmake -S . -B build && cmake --build build -j`.
@@ -83,11 +84,23 @@ create an account in each (new accounts get a simulated balance of 100), then:
 Each program can also be started by hand:
 
 ```sh
-./build/bank_server  --port 9000 --state bank_state.json --key dev-internal-key --candidates 10 [--fast]
+./build/bank_server  --port 9000 --state bank_state.json --key dev-internal-key --candidates 10 [--fast] \
+                     [--tls-cert server.crt --tls-key server.key]
 ./build/app_server   --port 8000 --bank-host 127.0.0.1 --bank-port 9000 --key dev-internal-key \
-                     --users users.json --start-balance 100
-./build/wallet_agent --port 8081 --app-host 127.0.0.1 --app-port 8000 --data ./wallet-data --ui ./ui
+                     --users users.json --start-balance 100 \
+                     [--tls-cert server.crt --tls-key server.key --bank-ca ca.crt]
+./build/wallet_agent --port 8081 --app-host 127.0.0.1 --app-port 8000 --data ./wallet-data --ui ./ui \
+                     [--app-ca ca.crt]
 ```
+
+**TLS.** `scripts/run_demo.sh` turns TLS on by default (`--no-tls` turns it
+off): `scripts/make_certs.sh demo-data/tls` creates a local certificate
+authority and a certificate for `localhost` / `127.0.0.1`, the bank and app
+server serve HTTPS (`--tls-cert`, `--tls-key`), and the app server and wallets
+verify the server certificate against that CA (`--bank-ca`, `--app-ca`). The
+browser-to-wallet connection stays plain HTTP on `127.0.0.1`: it never leaves
+the machine, and HTTPS there would only produce a self-signed-certificate
+warning.
 
 `--fast` uses small crypto sizes. `--key` is the shared secret the app server
 uses to call the bank; it must match on both. `--candidates` is `k`, the number
@@ -148,7 +161,9 @@ tests; `scripts/e2e.py` is the end-to-end test.
 - A dishonest bank could log a false tag against an account.
 - **Operators are assumed honest.** The app sees who pays whom, and timing and
   denomination could be correlated by an operator who logs it.
-- **Plain HTTP.** No TLS yet; use only on localhost.
+- **TLS uses a self-made CA.** Fine for a demo; a real deployment would use a
+  certificate from a public CA. TLS hides traffic from the network, not from the
+  app server, which still sees who pays whom.
 - **Coins live on the device.** A wallet's coins and secrets are in a local
   SQLite file per username (in the agent's `--data` directory). Logging in as the
   same user from another machine, or another wallet with a different data

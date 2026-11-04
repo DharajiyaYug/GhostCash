@@ -22,7 +22,7 @@ Decisions below are final for the build unless marked "open".
 - Transport: HTTP + JSON (cpp-httplib, nlohmann/json, both vendored header-only). The receiver gets pushes through long-polling an inbox endpoint.
 - Storage (as built): SQLite for the wallet's local coin store; the bank and the app server keep a JSON state file that is rewritten atomically after every change. Group parameters are generated once on the bank's first start and persisted in its state file.
 - Big integers are hex strings in JSON.
-- TLS is added last; no protocol logic depends on it.
+- TLS (HTTPS) between wallet, app and bank, verified against a local CA; no protocol logic depends on it.
 
 ## Parameters
 - Group: q = 256-bit, p = 3072-bit, generated once. RSA: 2048-bit, one key per denomination (1, 5, 10).
@@ -84,7 +84,7 @@ Pages: login, balance (bank balance + local coins), Generate (pick denomination)
 6. App server. Done.
 7. Wallet agent + web UI. Done.
 8. End-to-end script (`scripts/e2e.py`, also at full size with `E2E_FULL=1`). Done.
-9. Cut-and-choose (k = 10). Done. TLS: not done.
+9. Cut-and-choose (k = 10). Done. TLS between wallet, app and bank (local CA from `scripts/make_certs.sh`, on by default in `run_demo.sh` and `e2e.py`). Done.
 
 Not browser-tested: the web UI renders correctly against live data (headless Chrome screenshot) but its button handlers have not been clicked through in a browser; the end-to-end script exercises the same JSON API the buttons call.
 

@@ -104,6 +104,9 @@ struct Agent {
 
     std::string app_host = "127.0.0.1";
     int app_port = 8000;
+    std::string app_ca;
+
+    net::Endpoint app() const { return net::Endpoint{app_host, app_port, app_ca}; }
     std::string data_dir = "./wallet-data";
 
     std::string username, token;
@@ -135,14 +138,14 @@ void expire_session() {
 
 json app_call(const std::string& method, const std::string& path, const json& body, int& status,
               bool with_token = true) {
-    httplib::Client cli(ag.app_host, ag.app_port);
-    cli.set_connection_timeout(5);
-    cli.set_read_timeout(30);
+    auto cli = ag.app().client();
+    cli->set_connection_timeout(5);
+    cli->set_read_timeout(30);
     httplib::Headers headers;
     if (with_token) headers.emplace("X-Token", ag.token);
-    httplib::Result r = (method == "POST") ? cli.Post(path.c_str(), headers, body.dump(), "application/json")
-                                           : cli.Get(path.c_str(), headers);
-    if (!r) throw std::runtime_error("cannot reach the app server");
+    httplib::Result r = (method == "POST") ? cli->Post(path.c_str(), headers, body.dump(), "application/json")
+                                           : cli->Get(path.c_str(), headers);
+    if (!r) throw std::runtime_error("cannot reach the app server (" + httplib::to_string(r.error()) + ")");
     status = r->status;
     if (with_token && status == 401) expire_session();
     return json::parse(r->body);
@@ -268,10 +271,15 @@ void inbox_loop(unsigned long generation, std::string token) {
             std::lock_guard<std::mutex> lock(ag.mu);
             if (generation != ag.generation) return;
         }
-        httplib::Client cli(ag.app_host, ag.app_port);
-        cli.set_connection_timeout(5);
-        cli.set_read_timeout(45);
-        httplib::Result r = cli.Get("/transfer/inbox?wait=20", httplib::Headers{{"X-Token", token}});
+        net::Endpoint ep;
+        {
+            std::lock_guard<std::mutex> lock(ag.mu);
+            ep = ag.app();
+        }
+        auto cli = ep.client();
+        cli->set_connection_timeout(5);
+        cli->set_read_timeout(45);
+        httplib::Result r = cli->Get("/transfer/inbox?wait=20", httplib::Headers{{"X-Token", token}});
         if (!r) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
@@ -336,6 +344,7 @@ int main(int argc, char** argv) {
     const int port = args.get_int("port", 8081);
     ag.app_host = args.get("app-host", "127.0.0.1");
     ag.app_port = args.get_int("app-port", 8000);
+    ag.app_ca = args.get("app-ca", "");
     ag.data_dir = args.get("data", "./wallet-data");
     const std::string ui_dir = args.get("ui", "./ui");
 
@@ -592,7 +601,7 @@ int main(int argc, char** argv) {
         std::cerr << "[wallet] warning: UI directory '" << ui_dir << "' not found\n";
     }
 
-    std::cout << "[wallet] open http://127.0.0.1:" << port << "/  (app " << ag.app_host << ":" << ag.app_port
+    std::cout << "[wallet] open http://127.0.0.1:" << port << "/  (app " << ag.app().url()
               << ", data " << ag.data_dir << ")\n" << std::flush;
     if (!svr.listen("127.0.0.1", port)) {
         std::cerr << "[wallet] could not listen on port " << port << "\n";

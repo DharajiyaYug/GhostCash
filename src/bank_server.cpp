@@ -55,7 +55,9 @@ int main(int argc, char** argv) {
         std::cout << "done\n";
     }
 
-    httplib::Server svr;
+    bool tls = false;
+    auto server = net::make_server(args, tls);
+    httplib::Server& svr = *server;
 
     auto handler = [&](bool internal, std::function<void(const httplib::Request&, httplib::Response&)> fn) {
         return [&, internal, fn](const httplib::Request& req, httplib::Response& res) {
@@ -155,7 +157,7 @@ int main(int argc, char** argv) {
                              {"spent_count", bank.spent_count()}});
     }));
 
-    std::cout << "[bank] listening on 127.0.0.1:" << port << "\n" << std::flush;
+    std::cout << "[bank] listening on " << (tls ? "https" : "http") << "://127.0.0.1:" << port << "\n" << std::flush;
     if (!svr.listen("127.0.0.1", port)) {
         std::cerr << "[bank] could not listen on port " << port << "\n";
         return 1;

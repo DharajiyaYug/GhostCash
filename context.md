@@ -44,7 +44,7 @@ Built and verified:
 - Usernames: letters/digits/underscore, 3-20 chars, case-insensitive unique.
 - Paying yourself is allowed.
 
-Not built (see sections 12 and 13): SQLite for bank/app (they still use JSON files), coins following the login (encrypted vault), TLS, "what the bank sees" panel, encrypting the local wallet file. The final report draft (LaTeX) lives outside the repo at `C:\IITK\CS670\report\report.tex`; its limitations section predates cut-and-choose and the RNG change.
+Not built (see sections 12 and 13): SQLite for bank/app (they still use JSON files), coins following the login (encrypted vault), "what the bank sees" panel, encrypting the local wallet file. The final report draft (LaTeX) lives outside the repo at `C:\IITK\CS670\report\report.tex`; its limitations section predates cut-and-choose and the RNG change.
 
 Git: `main` = `origin/main` = `ee5fc42`. Working tree clean at the time of writing (this file was added after).
 
@@ -62,7 +62,8 @@ Git: `main` = `origin/main` = `ee5fc42`. Working tree clean at the time of writi
  - JSON API /api/...                                   - stores NO coin data       - flagged accounts
 ```
 
-- Everything runs on one machine for the demo, on `127.0.0.1`. Plain HTTP. All programs are separate processes.
+- Everything runs on one machine for the demo, on `127.0.0.1`. All programs are separate processes.
+- **TLS:** wallet -> app and app -> bank use HTTPS when configured (`run_demo.sh` and `e2e.py` do this by default). `scripts/make_certs.sh <dir>` makes a local CA (`ca.crt`) and a server certificate for `localhost` / `127.0.0.1` (`server.crt`, `server.key`). Bank and app take `--tls-cert`/`--tls-key`; the app takes `--bank-ca`, the wallet `--app-ca` (giving a CA switches that client to HTTPS with certificate and hostname verification). Helpers in `src/net_common.hpp`: `net::make_server(args, tls)`, `net::Endpoint{host, port, ca}.client()`. httplib is built with `CPPHTTPLIB_OPENSSL_SUPPORT` and the servers link `-lssl`. Browser -> wallet stays plain HTTP on loopback.
 - The wallet agent talks only to the app server. The app server talks to the bank with a shared secret header `X-Internal-Key` (default `dev-internal-key`). The bank is not meant to be reachable by users.
 - During a **transfer** two wallet agents talk to each other **through the app server's mailbox**; the bank is not contacted (this is the "offline" property: no bank contact while paying).
 - The app server **takes the account name from the session**, never from the request body, when it calls the bank. So a user can only withdraw from their own account, and only redeem transcripts that name them as receiver.
@@ -166,7 +167,7 @@ Spent-coin database is keyed by **serial**.
 - **Cut-and-choose is probabilistic.** With `k = 10`, a wallet with one false tag slips through with probability 1/10; if it then double-spends, the bank detects it but cannot name it (test `[limitation]` shows both outcomes). The other 9 times out of 10 it is caught and flagged at withdrawal. An open withdrawal blocks further withdrawals on that account until the bank restarts (an honest wallet that crashes mid-withdrawal is stuck until then). A dishonest bank could still log a false tag.
 - **RNG:** fixed. `Rng` draws every value from OpenSSL `RAND_bytes` (rejection sampling for "below n"); GMP's Mersenne Twister is no longer used. Previously the serial and challenge nonce (public) came from the same Mersenne Twister as `a, s`, which in principle let an observer predict future secrets.
 - **Wallet secrets stored unencrypted** in the local SQLite file.
-- No TLS; plain HTTP.
+- TLS uses a self-made local CA (demo only). TLS hides traffic from the network, not from the app server.
 - Group generation not the verifiable FIPS 186 method.
 - Coins are single-use; no change; a received payment is redeemed, not re-spent.
 - The bank is trusted for availability and solvency.
@@ -442,7 +443,7 @@ Each mutating request (open account, withdraw, deposit) runs in one transaction 
 - One-command demo start (exists: `scripts/run_demo.sh`) and a written demo script/walkthrough.
 
 ### 12.4 Optional
-- TLS, a Dockerfile, an "amount" transfer that auto-picks coins, native Windows support.
+- A Dockerfile, an "amount" transfer that auto-picks coins, native Windows support.
 
 ---
 
@@ -453,7 +454,7 @@ Highest priority first (the user wants these written simply for teammates who mi
 1. **Trusting the tag.** Resolved with cut-and-choose (k = 10); the remaining 1/k chance is stated as a limitation.
 2. **Random numbers.** Resolved: all randomness from OpenSSL `RAND_bytes`.
 3. **App server sees who pays whom.** *Suggestion:* keep; state the honest-operator assumption in the report.
-4. **No TLS.** *Suggestion:* localhost-only for the demo, state it; add TLS only if hosting publicly.
+4. **TLS.** Resolved: HTTPS between wallet, app and bank with a local CA (on by default in the demo script).
 5. **Wallet file unencrypted** (anyone with the file can spend the coins). *Suggestion:* encrypt it with a password-derived key; reuse the vault encryption.
 6. **Coins follow the login** (12.2). *Suggestion:* encrypted vault, ignoring multi-device conflicts.
 7. **Databases** (12.1). *Suggestion:* SQLite for bank and app.

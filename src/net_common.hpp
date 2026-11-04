@@ -1,5 +1,6 @@
 #pragma once
 
+#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.h"
 #include <nlohmann/json.hpp>
 #include <openssl/rand.h>
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -56,6 +58,37 @@ public:
 private:
     std::map<std::string, std::string> values_;
     std::set<std::string> flags_;
+};
+
+inline std::unique_ptr<httplib::Server> make_server(const Args& args, bool& tls) {
+    const std::string cert = args.get("tls-cert", "");
+    const std::string key = args.get("tls-key", "");
+    tls = !cert.empty() || !key.empty();
+    if (!tls) return std::make_unique<httplib::Server>();
+    if (cert.empty() || key.empty()) {
+        throw std::runtime_error("--tls-cert and --tls-key must be given together");
+    }
+    auto svr = std::make_unique<httplib::SSLServer>(cert.c_str(), key.c_str());
+    if (!svr->is_valid()) throw std::runtime_error("could not load TLS certificate " + cert + " / key " + key);
+    return svr;
+}
+
+struct Endpoint {
+    std::string host;
+    int port = 0;
+    std::string ca;
+
+    bool tls() const { return !ca.empty(); }
+
+    std::unique_ptr<httplib::Client> client() const {
+        if (!tls()) return std::make_unique<httplib::Client>(host, port);
+        auto cli = std::make_unique<httplib::Client>("https://" + host + ":" + std::to_string(port));
+        cli->set_ca_cert_path(ca);
+        cli->enable_server_certificate_verification(true);
+        return cli;
+    }
+
+    std::string url() const { return (tls() ? "https://" : "http://") + host + ":" + std::to_string(port); }
 };
 
 inline bool read_file(const std::string& path, std::string& out) {

@@ -59,8 +59,8 @@ constexpr size_t kMaxQueued = 100;
 int main(int argc, char** argv) {
     net::Args args(argc, argv);
     const int port = args.get_int("port", 8000);
-    const std::string bank_host = args.get("bank-host", "127.0.0.1");
-    const int bank_port = args.get_int("bank-port", 9000);
+    const net::Endpoint bank_ep{args.get("bank-host", "127.0.0.1"), args.get_int("bank-port", 9000),
+                                args.get("bank-ca", "")};
     const std::string internal_key = args.get("key", "dev-internal-key");
     const std::string users_path = args.get("users", "users.json");
     const int start_balance = args.get_int("start-balance", 100);
@@ -103,13 +103,13 @@ int main(int argc, char** argv) {
 
     auto bank_call = [&](const std::string& method, const std::string& path, const json& body,
                          int& status) -> json {
-        httplib::Client cli(bank_host, bank_port);
-        cli.set_connection_timeout(5);
-        cli.set_read_timeout(60);
+        auto cli = bank_ep.client();
+        cli->set_connection_timeout(5);
+        cli->set_read_timeout(60);
         httplib::Headers headers = {{"X-Internal-Key", internal_key}};
-        httplib::Result r = (method == "POST") ? cli.Post(path.c_str(), headers, body.dump(), "application/json")
-                                               : cli.Get(path.c_str(), headers);
-        if (!r) throw std::runtime_error("bank unreachable");
+        httplib::Result r = (method == "POST") ? cli->Post(path.c_str(), headers, body.dump(), "application/json")
+                                               : cli->Get(path.c_str(), headers);
+        if (!r) throw std::runtime_error("bank unreachable (" + httplib::to_string(r.error()) + ")");
         status = r->status;
         return json::parse(r->body);
     };
@@ -148,7 +148,9 @@ int main(int argc, char** argv) {
         return token;
     };
 
-    httplib::Server svr;
+    bool tls = false;
+    auto server = net::make_server(args, tls);
+    httplib::Server& svr = *server;
 
     svr.Get("/health", handler(false, [&](const httplib::Request&, httplib::Response& res, const std::string&) {
         reply(res, 200, json{{"ok", true}});
@@ -329,7 +331,8 @@ int main(int argc, char** argv) {
         reply(res, 200, json{{"messages", messages}});
     }));
 
-    std::cout << "[app] listening on 127.0.0.1:" << port << " (bank " << bank_host << ":" << bank_port << ")\n"
+    std::cout << "[app] listening on " << (tls ? "https" : "http") << "://127.0.0.1:" << port
+              << " (bank " << bank_ep.url() << ")\n"
               << std::flush;
     if (!svr.listen("127.0.0.1", port)) {
         std::cerr << "[app] could not listen on port " << port << "\n";

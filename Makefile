@@ -75,6 +75,8 @@ TEST_SRCS    := tests/test_main.cpp \
 TEST_BIN     := build/run_tests
 
 NET_CXXFLAGS := $(CXXFLAGS) -Ithird_party -pthread
+TLS_LIBS     := $(if $(SSL_PREFIX),-L$(SSL_PREFIX)/lib )-lssl
+NET_LDFLAGS  := $(TLS_LIBS) $(LDFLAGS)
 NET_HEADERS  := $(HEADERS) src/net_common.hpp third_party/httplib.h third_party/nlohmann/json.hpp
 
 BANK_BIN     := build/bank_server
@@ -103,13 +105,13 @@ $(TEST_BIN): $(TEST_SRCS) $(HEADERS) tests/third_party/catch.hpp | build
 	$(CXX) $(TEST_CXXFLAGS) $(TEST_SRCS) -o $(TEST_BIN) $(LDFLAGS)
 
 $(BANK_BIN): src/bank_server.cpp $(NET_HEADERS) | build
-	$(CXX) $(NET_CXXFLAGS) src/bank_server.cpp -o $@ $(LDFLAGS)
+	$(CXX) $(NET_CXXFLAGS) src/bank_server.cpp -o $@ $(NET_LDFLAGS)
 
 $(APP_BIN): src/app_server.cpp $(NET_HEADERS) | build
-	$(CXX) $(NET_CXXFLAGS) src/app_server.cpp -o $@ $(LDFLAGS)
+	$(CXX) $(NET_CXXFLAGS) src/app_server.cpp -o $@ $(NET_LDFLAGS)
 
 $(WALLET_BIN): src/wallet_agent.cpp $(NET_HEADERS) | build
-	$(CXX) $(NET_CXXFLAGS) src/wallet_agent.cpp -o $@ $(LDFLAGS) -lsqlite3
+	$(CXX) $(NET_CXXFLAGS) src/wallet_agent.cpp -o $@ $(NET_LDFLAGS) -lsqlite3
 
 build:
 	mkdir -p build

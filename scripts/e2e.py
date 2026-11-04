@@ -2,6 +2,7 @@
 import json
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -17,18 +18,23 @@ BANK_PORT, APP_PORT = 19000, 18000
 WALLET_PORTS = {"alice": 18081, "bob": 18082, "carol": 18083, "erin": 18084}
 USERNAMES = {"erin": "Erin"}
 INTERNAL_KEY = "e2e-internal-key"
+TLS = os.environ.get("E2E_TLS", "1") != "0"
 
 procs = []
 failures = []
+tls_ctx = None
+tls_dir = None
 
-def http(port, path, method="GET", body=None, headers=None):
+def http(port, path, method="GET", body=None, headers=None, scheme=None):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), data=data, method=method)
+    if scheme is None:
+        scheme = "https" if TLS and port in (APP_PORT, BANK_PORT) else "http"
+    req = urllib.request.Request("%s://127.0.0.1:%d%s" % (scheme, port, path), data=data, method=method)
     req.add_header("Content-Type", "application/json")
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with urllib.request.urlopen(req, timeout=60, context=tls_ctx if scheme == "https" else None) as r:
             return r.status, json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
         raw = e.read()
@@ -61,9 +67,17 @@ def wait_up(port, path="/health", timeout=60):
             time.sleep(0.2)
     raise RuntimeError("port %d did not come up" % port)
 
+def server_tls_args():
+    if not TLS:
+        return []
+    return ["--tls-cert", os.path.join(tls_dir, "server.crt"), "--tls-key", os.path.join(tls_dir, "server.key")]
+
+def ca_args(flag):
+    return [flag, os.path.join(tls_dir, "ca.crt")] if TLS else []
+
 def start_bank(tmp, logdir):
     argv = [os.path.join(BUILD, "bank_server"), "--port", str(BANK_PORT),
-            "--state", os.path.join(tmp, "bank_state.json"), "--key", INTERNAL_KEY]
+            "--state", os.path.join(tmp, "bank_state.json"), "--key", INTERNAL_KEY] + server_tls_args()
     if not os.environ.get("E2E_FULL"):
         argv.append("--fast")
     p = start("bank", argv, logdir)
@@ -84,11 +98,20 @@ def main():
     os.makedirs(logdir)
     print("working directory:", tmp)
 
+    global tls_ctx, tls_dir
+    if TLS:
+        tls_dir = os.path.join(tmp, "tls")
+        subprocess.run([os.path.join(ROOT, "scripts", "make_certs.sh"), tls_dir], check=True,
+                       stdout=subprocess.DEVNULL)
+        tls_ctx = ssl.create_default_context(cafile=os.path.join(tls_dir, "ca.crt"))
+    print("TLS between wallet, app and bank:", "on" if TLS else "off")
+
     try:
         bank = start_bank(tmp, logdir)
         def start_app():
             p = start("app", [os.path.join(BUILD, "app_server"), "--port", str(APP_PORT), "--bank-port", str(BANK_PORT),
-                              "--key", INTERNAL_KEY, "--users", os.path.join(tmp, "users.json")], logdir)
+                              "--key", INTERNAL_KEY, "--users", os.path.join(tmp, "users.json")]
+                      + server_tls_args() + ca_args("--bank-ca"), logdir)
             wait_up(APP_PORT)
             return p
 
@@ -96,7 +119,7 @@ def main():
         for user, port in WALLET_PORTS.items():
             start("wallet-" + user, [os.path.join(BUILD, "wallet_agent"), "--port", str(port),
                                      "--app-port", str(APP_PORT), "--data", os.path.join(tmp, "data-" + user),
-                                     "--ui", UI], logdir)
+                                     "--ui", UI] + ca_args("--app-ca"), logdir)
             wait_up(port, "/api/state")
 
         print("\n[1] accounts")
@@ -190,6 +213,23 @@ def main():
               "mallory" in adm.get("flagged", []) and adm.get("balances", {}).get("mallory") == 100, adm)
         s, r = http(BANK_PORT, "/accounts/alice/balance")
         check("bank refuses calls without the internal key", s == 403, (s, r))
+
+        if TLS:
+            def plain_http_fails(port):
+                try:
+                    st, _ = http(port, "/health", scheme="http")
+                    return st != 200
+                except (urllib.error.URLError, ConnectionError, OSError):
+                    return True
+            check("app server refuses plain HTTP", plain_http_fails(APP_PORT))
+            check("bank refuses plain HTTP", plain_http_fails(BANK_PORT))
+            try:
+                urllib.request.urlopen("https://127.0.0.1:%d/health" % APP_PORT, timeout=10,
+                                       context=ssl.create_default_context())
+                untrusted_rejected = False
+            except urllib.error.URLError as e:
+                untrusted_rejected = isinstance(e.reason, ssl.SSLCertVerificationError)
+            check("a client that does not trust our CA rejects the certificate", untrusted_rejected)
 
         print("\n[6] unreachable receivers and insufficient balance")
         s, r = wallet("alice", "/api/transfer", "POST", {"to": "nobody", "coin_id": five, "force": True})
