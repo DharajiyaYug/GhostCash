@@ -3,6 +3,7 @@
 #include "ghostcash/bank.hpp"
 #include "ghostcash/bigint.hpp"
 #include "ghostcash/coin.hpp"
+#include "ghostcash/cut_choose.hpp"
 #include "ghostcash/group_setup.hpp"
 #include "ghostcash/public_keys.hpp"
 #include "ghostcash/transcript.hpp"
@@ -10,6 +11,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace wire {
 using json = nlohmann::json;
@@ -62,7 +64,38 @@ inline json params_to_json(const GroupParams& group, const Bank& bank) {
                           {"n", hex(bank.public_modulus(d))},
                           {"e", hex(bank.public_exponent(d))}});
     }
-    return {{"group", group_to_json(group)}, {"denominations", denoms}};
+    return {{"group", group_to_json(group)}, {"denominations", denoms},
+            {"withdraw_candidates", bank.withdraw_candidates()}};
+}
+
+inline json candidates_to_json(const std::vector<WithdrawCandidate>& cs) {
+    json arr = json::array();
+    for (const auto& c : cs) arr.push_back({{"blinded_m", hex(c.blinded_m)}, {"tag", hex(c.tag)}});
+    return arr;
+}
+
+inline std::vector<WithdrawCandidate> candidates_from_json(const json& arr) {
+    std::vector<WithdrawCandidate> cs;
+    for (const auto& c : arr) cs.push_back(WithdrawCandidate{from_hex(c.at("blinded_m")), from_hex(c.at("tag"))});
+    return cs;
+}
+
+inline json openings_to_json(const std::vector<CandidateOpening>& os) {
+    json arr = json::array();
+    for (const auto& o : os) {
+        arr.push_back({{"index", o.index}, {"serial", o.serial},
+                       {"a", hex(o.a)}, {"s", hex(o.s)}, {"r", hex(o.r)}});
+    }
+    return arr;
+}
+
+inline std::vector<CandidateOpening> openings_from_json(const json& arr) {
+    std::vector<CandidateOpening> os;
+    for (const auto& o : arr) {
+        os.push_back(CandidateOpening{o.at("index").get<size_t>(), o.at("serial").get<std::string>(),
+                                      from_hex(o.at("a")), from_hex(o.at("s")), from_hex(o.at("r"))});
+    }
+    return os;
 }
 
 inline void ring_from_json(PublicKeyRing& ring, const json& denoms) {

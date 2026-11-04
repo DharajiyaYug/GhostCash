@@ -3,7 +3,7 @@
 #include "ghostcash/rng.hpp"
 
 TEST_CASE("GroupSetup: p and q have the requested bit lengths", "[group_setup]") {
-    gmp_randstate_t& rng = Rng::instance();
+    Rng& rng = Rng::instance();
     GroupParams group = GroupSetup::generate(64, 256, rng);
 
     REQUIRE(group.q.bit_length() == 64);
@@ -11,7 +11,7 @@ TEST_CASE("GroupSetup: p and q have the requested bit lengths", "[group_setup]")
 }
 
 TEST_CASE("GroupSetup: p and q are both prime", "[group_setup]") {
-    gmp_randstate_t& rng = Rng::instance();
+    Rng& rng = Rng::instance();
     GroupParams group = GroupSetup::generate(64, 256, rng);
 
     REQUIRE(mpz_probab_prime_p(group.p.v, 40) > 0);
@@ -19,7 +19,7 @@ TEST_CASE("GroupSetup: p and q are both prime", "[group_setup]") {
 }
 
 TEST_CASE("GroupSetup: q divides p - 1", "[group_setup]") {
-    gmp_randstate_t& rng = Rng::instance();
+    Rng& rng = Rng::instance();
     GroupParams group = GroupSetup::generate(64, 256, rng);
 
     mpz_t p_minus_1, remainder;
@@ -33,7 +33,7 @@ TEST_CASE("GroupSetup: q divides p - 1", "[group_setup]") {
 }
 
 TEST_CASE("GroupSetup: g has order exactly q (g^q == 1, g != 1)", "[group_setup]") {
-    gmp_randstate_t& rng = Rng::instance();
+    Rng& rng = Rng::instance();
     GroupParams group = GroupSetup::generate(64, 256, rng);
 
     REQUIRE(group.g != BigInt(1));
@@ -43,7 +43,7 @@ TEST_CASE("GroupSetup: g has order exactly q (g^q == 1, g != 1)", "[group_setup]
 }
 
 TEST_CASE("GroupSetup: rejects p_bits <= q_bits", "[group_setup]") {
-    gmp_randstate_t& rng = Rng::instance();
+    Rng& rng = Rng::instance();
     REQUIRE_THROWS_AS(GroupSetup::generate(256, 256, rng), std::invalid_argument);
     REQUIRE_THROWS_AS(GroupSetup::generate(256, 128, rng), std::invalid_argument);
 }

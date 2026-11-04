@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ghostcash/rng.hpp"
 #include <gmp.h>
 #include <string>
 #include <stdexcept>
@@ -77,11 +78,17 @@ public:
         BigInt r; mpz_gcd(r.v, a.v, b.v); return r;
     }
 
-    static BigInt random_below(const BigInt& n, gmp_randstate_t& rng) {
+    static BigInt random_below(const BigInt& n, Rng& rng) {
         BigInt r;
         do {
-            mpz_urandomm(r.v, rng, n.v);
+            rng.below(r.v, n.v);
         } while (mpz_sgn(r.v) == 0);
+        return r;
+    }
+
+    static BigInt random_bits(size_t nbits, Rng& rng) {
+        BigInt r;
+        rng.bits(r.v, nbits);
         return r;
     }
 

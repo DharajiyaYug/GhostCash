@@ -1,9 +1,11 @@
 #pragma once
 
 #include "ghostcash/bigint.hpp"
+#include "ghostcash/cut_choose.hpp"
 #include "ghostcash/group_setup.hpp"
 #include "ghostcash/hash_utils.hpp"
 #include "ghostcash/public_keys.hpp"
+#include "ghostcash/rng.hpp"
 #include "ghostcash/rsa_keygen.hpp"
 #include "ghostcash/transcript.hpp"
 #include "ghostcash/zkp.hpp"
@@ -42,7 +44,7 @@ public:
         has_group_ = true;
     }
 
-    void add_denomination(int denomination, int rsa_bits, gmp_randstate_t& rng) {
+    void add_denomination(int denomination, int rsa_bits, Rng& rng) {
         if (keys_.count(denomination)) {
             throw std::invalid_argument("Bank: denomination already registered");
         }
@@ -74,17 +76,66 @@ public:
     bool has_group() const { return has_group_; }
     const GroupParams& group() const { return group_; }
 
-    BigInt withdraw(const std::string& user, int denomination,
-                    const BigInt& blinded_message, const BigInt& tag) {
+    int withdraw_candidates() const { return withdraw_candidates_; }
+
+    void set_withdraw_candidates(int k) {
+        if (k < 1) throw std::invalid_argument("Bank: need at least one withdrawal candidate");
+        withdraw_candidates_ = k;
+    }
+
+    size_t begin_withdrawal(const std::string& user, int denomination,
+                            const std::vector<WithdrawCandidate>& candidates) {
         if (!has_denomination(denomination)) {
             throw std::invalid_argument("Bank: unknown denomination");
         }
-        if (tag_log_.count(tag.to_string(16))) {
+        if (candidates.size() != static_cast<size_t>(withdraw_candidates_)) {
+            throw std::invalid_argument("Bank: expected " + std::to_string(withdraw_candidates_) +
+                                        " withdrawal candidates");
+        }
+        require_funds(user, denomination);
+        if (pending_.count(user)) {
+            throw std::invalid_argument("Bank: a previous withdrawal is still open; finish it first");
+        }
+
+        const BigInt& n = public_modulus(denomination);
+        std::set<std::string> tags;
+        for (const auto& c : candidates) {
+            if (mpz_sgn(c.blinded_m.v) <= 0 || mpz_cmp(c.blinded_m.v, n.v) >= 0) {
+                throw std::invalid_argument("Bank: blinded value out of range");
+            }
+            std::string t = c.tag.to_string(16);
+            if (tag_log_.count(t) || !tags.insert(t).second) {
+                throw std::invalid_argument("Bank: withdrawal tag already used");
+            }
+        }
+
+        size_t keep = Rng::instance().index_below(candidates.size());
+        pending_[user] = PendingCutChoose{denomination, candidates, keep};
+        return keep;
+    }
+
+    BigInt finish_withdrawal(const std::string& user, const std::vector<CandidateOpening>& openings) {
+        auto it = pending_.find(user);
+        if (it == pending_.end()) {
+            throw std::invalid_argument("Bank: no withdrawal in progress");
+        }
+        PendingCutChoose pc = std::move(it->second);
+        pending_.erase(it);
+
+        std::string failure = check_openings(pc, openings);
+        if (!failure.empty()) {
+            flagged_.insert(user);
+            throw std::invalid_argument("Bank: cut-and-choose check failed (" + failure + "); account flagged");
+        }
+
+        const WithdrawCandidate& chosen = pc.candidates[pc.keep];
+        std::string tag = chosen.tag.to_string(16);
+        if (tag_log_.count(tag)) {
             throw std::invalid_argument("Bank: withdrawal tag already used");
         }
-        debit(user, denomination);
-        tag_log_[tag.to_string(16)] = user;
-        return blind_sign(denomination, blinded_message);
+        debit(user, pc.denomination);
+        tag_log_[tag] = user;
+        return blind_sign(pc.denomination, chosen.blinded_m);
     }
 
     DepositResult deposit(const Transcript& t) {
@@ -145,6 +196,13 @@ public:
         return r;
     }
 
+    bool has_open_withdrawal(const std::string& user) const { return pending_.count(user) != 0; }
+    size_t open_withdrawal_index(const std::string& user) const {
+        auto it = pending_.find(user);
+        if (it == pending_.end()) throw std::invalid_argument("Bank: no withdrawal in progress");
+        return it->second.keep;
+    }
+
     bool is_flagged(const std::string& user) const { return flagged_.count(user) != 0; }
     const std::set<std::string>& flagged_accounts() const { return flagged_; }
     size_t spent_count() const { return spent_.size(); }
@@ -176,6 +234,53 @@ public:
     }
 
 private:
+    struct PendingCutChoose {
+        int denomination = 0;
+        std::vector<WithdrawCandidate> candidates;
+        size_t keep = 0;
+    };
+
+    void require_funds(const std::string& user, int amount) const {
+        auto it = balances_.find(user);
+        if (it == balances_.end()) {
+            throw std::invalid_argument("Bank: unknown account: " + user);
+        }
+        if (it->second < amount) {
+            throw std::invalid_argument("Bank: insufficient balance for account: " + user);
+        }
+    }
+
+    std::string check_openings(const PendingCutChoose& pc, const std::vector<CandidateOpening>& openings) const {
+        const size_t k = pc.candidates.size();
+        if (openings.size() != k - 1) return "wrong number of openings";
+
+        std::vector<bool> seen(k, false);
+        const BigInt& n = public_modulus(pc.denomination);
+        const BigInt& e = public_exponent(pc.denomination);
+        const BigInt one(1);
+
+        for (const auto& o : openings) {
+            if (o.index >= k || o.index == pc.keep || seen[o.index]) return "bad candidate index";
+            seen[o.index] = true;
+            const std::string which = "candidate " + std::to_string(o.index);
+
+            if (!in_range(o.a, group_.q) || !in_range(o.s, group_.q)) return which + ": secret out of range";
+            if (!in_range(o.r, n) || BigInt::gcd(o.r, n) != one) return which + ": bad blinding factor";
+
+            BigInt A = BigInt::powmod(group_.g, o.a, group_.p);
+            BigInt S = BigInt::powmod(group_.g, o.s, group_.p);
+            BigInt m = HashUtils::coin_message(o.serial, A, S, n);
+            BigInt expected = BigInt::mulmod(m, BigInt::powmod(o.r, e, n), n);
+            if (expected != pc.candidates[o.index].blinded_m) return which + ": blinded value does not match";
+            if (HashUtils::hash_tag(o.a, o.s) != pc.candidates[o.index].tag) return which + ": tag does not match";
+        }
+        return "";
+    }
+
+    static bool in_range(const BigInt& x, const BigInt& bound) {
+        return mpz_sgn(x.v) > 0 && mpz_cmp(x.v, bound.v) < 0;
+    }
+
     const RSAKeyPair& key_for(int denomination) const {
         auto it = keys_.find(denomination);
         if (it == keys_.end()) {
@@ -199,4 +304,6 @@ private:
     std::map<std::string, std::string> tag_log_;
     std::map<std::string, Transcript> spent_;
     std::set<std::string> flagged_;
+    int withdraw_candidates_ = kDefaultWithdrawCandidates;
+    std::map<std::string, PendingCutChoose> pending_;
 };

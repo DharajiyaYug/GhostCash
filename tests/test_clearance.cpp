@@ -29,10 +29,11 @@ struct Fixture {
 };
 
 WalletCoin withdraw(Fixture& f, const std::string& user, int denom) {
-    PendingWithdrawal pending;
-    BigInt blinded = f.wallet.prepare_withdrawal(denom, f.bank, pending);
-    BigInt blind_sig = f.bank.withdraw(user, denom, blinded, pending.tag);
-    return f.wallet.finish_withdrawal(f.bank, pending, blind_sig);
+    WithdrawalBatch batch;
+    auto candidates = f.wallet.prepare_batch(denom, f.bank, f.bank.withdraw_candidates(), batch);
+    size_t keep = f.bank.begin_withdrawal(user, denom, candidates);
+    BigInt blind_sig = f.bank.finish_withdrawal(user, Wallet::open_batch(batch, keep));
+    return f.wallet.finish_withdrawal(f.bank, batch.candidates[keep], blind_sig);
 }
 
 bool pay(Fixture& f, Merchant& m, WalletCoin& wc, const std::string& time, Transcript& out) {
@@ -226,50 +227,156 @@ TEST_CASE("Withdrawal: insufficient balance is rejected and leaves no trace", "[
     Fixture f;
     f.bank.set_balance("poor", 2);
 
-    PendingWithdrawal pending;
-    BigInt blinded = f.wallet.prepare_withdrawal(5, f.bank, pending);
-    REQUIRE_THROWS(f.bank.withdraw("poor", 5, blinded, pending.tag));
+    WithdrawalBatch batch;
+    auto candidates = f.wallet.prepare_batch(5, f.bank, f.bank.withdraw_candidates(), batch);
+    REQUIRE_THROWS(f.bank.begin_withdrawal("poor", 5, candidates));
     REQUIRE(f.bank.balance("poor") == 2);
+    REQUIRE_FALSE(f.bank.has_open_withdrawal("poor"));
 
     f.bank.set_balance("poor", 10);
-    REQUIRE_NOTHROW(f.bank.withdraw("poor", 5, blinded, pending.tag));
+    REQUIRE_NOTHROW(withdraw(f, "poor", 5));
     REQUIRE(f.bank.balance("poor") == 5);
 }
 
-TEST_CASE("Withdrawal: a repeated tag is rejected", "[clearance][account]") {
+TEST_CASE("Withdrawal: a tag that was already logged is rejected", "[clearance][account]") {
     Fixture f;
-    PendingWithdrawal pending;
-    BigInt blinded = f.wallet.prepare_withdrawal(5, f.bank, pending);
-
-    REQUIRE_NOTHROW(f.bank.withdraw("alice", 5, blinded, pending.tag));
-    REQUIRE_THROWS(f.bank.withdraw("alice", 5, blinded, pending.tag));
+    WithdrawalBatch first;
+    auto c1 = f.wallet.prepare_batch(5, f.bank, f.bank.withdraw_candidates(), first);
+    size_t keep = f.bank.begin_withdrawal("alice", 5, c1);
+    f.bank.finish_withdrawal("alice", Wallet::open_batch(first, keep));
     REQUIRE(f.bank.balance("alice") == 95);
+
+    WithdrawalBatch second;
+    auto c2 = f.wallet.prepare_batch(5, f.bank, f.bank.withdraw_candidates(), second);
+    c2[3].tag = c1[keep].tag;
+    REQUIRE_THROWS(f.bank.begin_withdrawal("alice", 5, c2));
+    REQUIRE(f.bank.balance("alice") == 95);
+}
+
+TEST_CASE("Withdrawal: the same tag twice in one batch is rejected", "[clearance][account]") {
+    Fixture f;
+    WithdrawalBatch batch;
+    auto candidates = f.wallet.prepare_batch(5, f.bank, f.bank.withdraw_candidates(), batch);
+    candidates[1].tag = candidates[0].tag;
+    REQUIRE_THROWS(f.bank.begin_withdrawal("alice", 5, candidates));
 }
 
 TEST_CASE("Withdrawal: an unknown denomination is rejected without charging", "[clearance][account]") {
     Fixture f;
-    PendingWithdrawal pending;
-    BigInt blinded = f.wallet.prepare_withdrawal(5, f.bank, pending);
-    REQUIRE_THROWS(f.bank.withdraw("alice", 7, blinded, pending.tag));
+    WithdrawalBatch batch;
+    auto candidates = f.wallet.prepare_batch(5, f.bank, f.bank.withdraw_candidates(), batch);
+    REQUIRE_THROWS(f.bank.begin_withdrawal("alice", 7, candidates));
     REQUIRE(f.bank.balance("alice") == 100);
 }
 
-TEST_CASE("Clearance: a wallet that lies about its tag double-spends untraceably (k = 1 trust assumption)", "[clearance][limitation]") {
+TEST_CASE("Cut-and-choose: the bank wants exactly k candidates", "[clearance][cutchoose]") {
     Fixture f;
+    WithdrawalBatch batch;
+    auto too_few = f.wallet.prepare_batch(5, f.bank, f.bank.withdraw_candidates() - 1, batch);
+    REQUIRE_THROWS(f.bank.begin_withdrawal("alice", 5, too_few));
+    REQUIRE(f.bank.withdraw_candidates() == kDefaultWithdrawCandidates);
+}
 
-    PendingWithdrawal pending;
-    BigInt blinded = f.wallet.prepare_withdrawal(5, f.bank, pending);
-    BigInt blind_sig = f.bank.withdraw("alice", 5, blinded, BigInt(123456789));
-    WalletCoin honest = f.wallet.finish_withdrawal(f.bank, pending, blind_sig);
-    WalletCoin copy = honest;
+TEST_CASE("Cut-and-choose: the account is charged only after the openings check out", "[clearance][cutchoose]") {
+    Fixture f;
+    WithdrawalBatch batch;
+    auto candidates = f.wallet.prepare_batch(5, f.bank, f.bank.withdraw_candidates(), batch);
+    size_t keep = f.bank.begin_withdrawal("alice", 5, candidates);
+    REQUIRE(keep < candidates.size());
+    REQUIRE(f.bank.open_withdrawal_index("alice") == keep);
+    REQUIRE(f.bank.balance("alice") == 100);
 
-    Transcript t1, t2;
-    REQUIRE(pay(f, f.bob, honest, "t1", t1));
-    REQUIRE(pay(f, f.carol, copy, "t2", t2));
+    BigInt sig = f.bank.finish_withdrawal("alice", Wallet::open_batch(batch, keep));
+    REQUIRE(f.bank.balance("alice") == 95);
+    REQUIRE_FALSE(f.bank.has_open_withdrawal("alice"));
 
-    REQUIRE(f.bank.deposit(t1).status == DepositStatus::Accepted);
-    DepositResult r = f.bank.deposit(t2);
-    REQUIRE(r.status == DepositStatus::DoubleSpend);
-    REQUIRE(r.flagged_account.empty());
-    REQUIRE(f.bank.flagged_accounts().empty());
+    WalletCoin wc = f.wallet.finish_withdrawal(f.bank, batch.candidates[keep], sig);
+    BigInt m = HashUtils::coin_message(wc.coin.serial, wc.coin.A, wc.coin.S, f.bank.public_modulus(5));
+    REQUIRE(f.bank.verify(5, m, wc.coin.signature));
+}
+
+TEST_CASE("Cut-and-choose: one withdrawal at a time, and no finish without a start", "[clearance][cutchoose]") {
+    Fixture f;
+    REQUIRE_THROWS(f.bank.finish_withdrawal("alice", {}));
+
+    WithdrawalBatch b1, b2;
+    auto c1 = f.wallet.prepare_batch(5, f.bank, f.bank.withdraw_candidates(), b1);
+    auto c2 = f.wallet.prepare_batch(5, f.bank, f.bank.withdraw_candidates(), b2);
+    size_t keep = f.bank.begin_withdrawal("alice", 5, c1);
+    REQUIRE_THROWS(f.bank.begin_withdrawal("alice", 5, c2));
+
+    REQUIRE_NOTHROW(f.bank.finish_withdrawal("alice", Wallet::open_batch(b1, keep)));
+    REQUIRE_THROWS(f.bank.finish_withdrawal("alice", Wallet::open_batch(b1, keep)));
+}
+
+TEST_CASE("Cut-and-choose: false tags on every candidate are always caught", "[clearance][cutchoose][attack]") {
+    Fixture f;
+    WithdrawalBatch batch;
+    auto candidates = f.wallet.prepare_batch(5, f.bank, f.bank.withdraw_candidates(), batch);
+    for (size_t i = 0; i < candidates.size(); ++i) candidates[i].tag = BigInt(1000 + static_cast<long>(i));
+
+    size_t keep = f.bank.begin_withdrawal("alice", 5, candidates);
+    REQUIRE_THROWS(f.bank.finish_withdrawal("alice", Wallet::open_batch(batch, keep)));
+    REQUIRE(f.bank.is_flagged("alice"));
+    REQUIRE(f.bank.balance("alice") == 100);
+}
+
+TEST_CASE("Cut-and-choose: refusing to open a candidate, or opening it wrongly, is caught", "[clearance][cutchoose][attack]") {
+    Fixture f;
+    f.bank.set_balance("dave", 100);
+
+    WithdrawalBatch b1;
+    auto c1 = f.wallet.prepare_batch(5, f.bank, f.bank.withdraw_candidates(), b1);
+    size_t keep1 = f.bank.begin_withdrawal("alice", 5, c1);
+    auto missing = Wallet::open_batch(b1, keep1);
+    missing.pop_back();
+    REQUIRE_THROWS(f.bank.finish_withdrawal("alice", missing));
+    REQUIRE(f.bank.is_flagged("alice"));
+
+    WithdrawalBatch b2;
+    auto c2 = f.wallet.prepare_batch(5, f.bank, f.bank.withdraw_candidates(), b2);
+    size_t keep2 = f.bank.begin_withdrawal("dave", 5, c2);
+    auto wrong = Wallet::open_batch(b2, keep2);
+    wrong[0].r = BigInt::add(wrong[0].r, BigInt(1));
+    REQUIRE_THROWS(f.bank.finish_withdrawal("dave", wrong));
+    REQUIRE(f.bank.is_flagged("dave"));
+    REQUIRE(f.bank.balance("dave") == 100);
+}
+
+TEST_CASE("Cut-and-choose: one false tag is caught unless the bank happens to keep it (probability 1/k)", "[clearance][cutchoose][limitation]") {
+    Fixture f;
+    bool caught = false, slipped = false;
+
+    for (int attempt = 0; attempt < 300 && !(caught && slipped); ++attempt) {
+        const std::string user = "m" + std::to_string(attempt);
+        f.bank.set_balance(user, 100);
+
+        WithdrawalBatch batch;
+        auto candidates = f.wallet.prepare_batch(5, f.bank, f.bank.withdraw_candidates(), batch);
+        candidates[0].tag = BigInt(123456789 + attempt);
+        size_t keep = f.bank.begin_withdrawal(user, 5, candidates);
+
+        if (keep != 0) {
+            REQUIRE_THROWS(f.bank.finish_withdrawal(user, Wallet::open_batch(batch, keep)));
+            REQUIRE(f.bank.is_flagged(user));
+            caught = true;
+            continue;
+        }
+        if (slipped) continue;
+
+        BigInt sig = f.bank.finish_withdrawal(user, Wallet::open_batch(batch, keep));
+        WalletCoin coin = f.wallet.finish_withdrawal(f.bank, batch.candidates[keep], sig);
+        WalletCoin copy = coin;
+        Transcript t1, t2;
+        REQUIRE(pay(f, f.bob, coin, "t1-" + user, t1));
+        REQUIRE(pay(f, f.carol, copy, "t2-" + user, t2));
+        REQUIRE(f.bank.deposit(t1).status == DepositStatus::Accepted);
+        DepositResult r = f.bank.deposit(t2);
+        REQUIRE(r.status == DepositStatus::DoubleSpend);
+        REQUIRE(r.flagged_account.empty());
+        REQUIRE_FALSE(f.bank.is_flagged(user));
+        slipped = true;
+    }
+    REQUIRE(caught);
+    REQUIRE(slipped);
 }

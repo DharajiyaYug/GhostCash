@@ -19,7 +19,7 @@ struct PaymentSession {
 
 class Merchant {
 public:
-    Merchant(std::string receiver_id, GroupParams group, const PublicKeySource& keys, gmp_randstate_t& rng)
+    Merchant(std::string receiver_id, GroupParams group, const PublicKeySource& keys, Rng& rng)
         : id_(std::move(receiver_id)), group_(std::move(group)), keys_(keys), rng_(rng) {}
 
     const std::string& id() const { return id_; }
@@ -50,11 +50,9 @@ private:
     std::string id_;
     GroupParams group_;
     const PublicKeySource& keys_;
-    gmp_randstate_t& rng_;
+    Rng& rng_;
 
     std::string random_nonce() {
-        BigInt n;
-        mpz_urandomb(n.v, rng_, 128);
-        return n.to_string(16);
+        return BigInt::random_bits(128, rng_).to_string(16);
     }
 };

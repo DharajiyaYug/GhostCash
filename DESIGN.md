@@ -27,7 +27,7 @@ Decisions below are final for the build unless marked "open".
 ## Parameters
 - Group: q = 256-bit, p = 3072-bit, generated once. RSA: 2048-bit, one key per denomination (1, 5, 10).
 - Tests and a `--fast` flag use reduced sizes. The spec sizes are used for the real servers and the demo.
-- Withdrawal default is the simple mode (`k = 1`): the wallet sends the tag T = H(a || s) with its request and the bank trusts it. Cut-and-choose with k > 1 (e.g. k = 10) is an optional hardening, built only after the end-to-end system works.
+- Withdrawal uses cut-and-choose with k = 10 candidates (bank option `--candidates`). All randomness comes from OpenSSL `RAND_bytes`.
 
 ## Protocol
 
@@ -35,14 +35,14 @@ Decisions below are final for the build unless marked "open".
 User signs up in the app with a username and password and a bank account. The app maps user to bank account. The wallet agent stores only the session token.
 
 ### Generate coin (withdraw)
-Default (k = 1): the wallet makes one coin, sends (denom, m', T) to the bank, the bank debits the account, logs T -> account, and returns the blind signature. Steps 3 and 4 below (index j, opening) are skipped. The steps below describe the optional cut-and-choose hardening (k > 1).
+Cut-and-choose (as built; `POST /withdraw/begin` then `POST /withdraw/finish`):
 1. Wallet makes k candidates. Each has fresh a_i, s_i, serial_i, A_i = g^a_i, S_i = g^s_i, m_i = FDH(serial_i || A_i || S_i), blinding r_i, m'_i = m_i * r_i^e mod n, and tag T_i = H(a_i || s_i).
 2. Wallet sends (denom, {m'_i, T_i}) through the app to the bank.
 3. Bank replies with random index j.
 4. Wallet opens all i != j: serial_i, a_i, s_i, r_i.
 5. Bank checks A_i, S_i, m_i, blinding and tag for every opened candidate. If all pass it debits the account, logs T_j -> account, and returns s'_j = (m'_j)^d.
 6. Wallet unblinds, stores coin (serial, A, S, sig, denom) and secrets (a, s) in local SQLite.
-Cheating wallet succeeds with probability 1/k. Failed check: reject the withdrawal and flag the account.
+Cheating wallet succeeds with probability 1/k. Failed check (including a missing opening): reject the withdrawal and flag the account. The bank charges nothing until step 5, and refuses a new withdrawal while one is open, so a cheater cannot abandon and retry until j lands on the false candidate.
 
 ### Transfer (pay)
 Payer and receiver are both logged in. Messages go through the app.
@@ -71,7 +71,7 @@ Pages: login, balance (bank balance + local coins), Generate (pick denomination)
 ## Fixes to the existing code (Phase 0) -- status
 1. Wallet keeps a and s (WalletCoin). Done.
 2. Full-domain hash for the signed message (SHA-256 in counter mode into Z_n). Done.
-3. RNG seeded from OpenSSL RAND_bytes instead of the clock. Done, but GMP's Mersenne Twister is still not a CSPRNG (documented in rng.hpp).
+3. RNG: first seeded from OpenSSL RAND_bytes instead of the clock; now every random value (a, s, r, serials, nonces, primes, cut-and-choose index) is drawn from RAND_bytes directly, with rejection sampling for values below a bound. Done.
 4. Subgroup and x != 0 checks on the verifier side. Done.
 5. Parameter sizes: the servers use the specified sizes (256-bit q, 3072-bit p, 2048-bit RSA) by default and `--fast` for small ones; the unit tests use small sizes for speed; `demo_interactive` still uses reduced sizes.
 
@@ -84,7 +84,7 @@ Pages: login, balance (bank balance + local coins), Generate (pick denomination)
 6. App server. Done.
 7. Wallet agent + web UI. Done.
 8. End-to-end script (`scripts/e2e.py`, also at full size with `E2E_FULL=1`). Done.
-9. Optional: cut-and-choose (k > 1), TLS. Not done.
+9. Cut-and-choose (k = 10). Done. TLS: not done.
 
 Not browser-tested: the web UI renders correctly against live data (headless Chrome screenshot) but its button handlers have not been clicked through in a browser; the end-to-end script exercises the same JSON API the buttons call.
 

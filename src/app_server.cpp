@@ -236,14 +236,22 @@ int main(int argc, char** argv) {
         reply(res, status, r);
     }));
 
-    svr.Post("/withdraw", handler(true, [&](const httplib::Request& req, httplib::Response& res, const std::string& user) {
+    svr.Post("/withdraw/begin", handler(true, [&](const httplib::Request& req, httplib::Response& res, const std::string& user) {
         json body = json::parse(req.body);
         int status = 0;
-        json r = bank_call("POST", "/withdraw",
+        json r = bank_call("POST", "/withdraw/begin",
                            {{"account", user},
                             {"denomination", body.at("denomination")},
-                            {"blinded_m", body.at("blinded_m")},
-                            {"tag", body.at("tag")}},
+                            {"candidates", body.at("candidates")}},
+                           status);
+        reply(res, status, r);
+    }));
+
+    svr.Post("/withdraw/finish", handler(true, [&](const httplib::Request& req, httplib::Response& res, const std::string& user) {
+        json body = json::parse(req.body);
+        int status = 0;
+        json r = bank_call("POST", "/withdraw/finish",
+                           {{"account", user}, {"openings", body.at("openings")}},
                            status);
         reply(res, status, r);
     }));

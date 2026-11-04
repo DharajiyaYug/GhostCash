@@ -2,7 +2,7 @@
 
 Purpose of this file: hand this to a fresh Claude (or a new teammate) so they can continue the project without having seen any earlier conversation. It describes what exists, how every part works, exactly what is sent on the wire, how to build/run/test it, which decisions are made, and which are still open.
 
-Last updated against `main` (commit hashes changed once when the history was rewritten to remove co-author lines; the file contents are the same as before). Everything described as "built" is in that commit and was verified: 74 unit test cases (376 assertions) pass, and `scripts/e2e.py` passes (about 45 checks).
+Last updated against `main` (commit hashes changed once when the history was rewritten to remove co-author lines; the file contents are the same as before). Everything described as "built" is in that commit and was verified: 80 unit test cases pass (about 410 assertions; the count varies slightly because one cut-and-choose test loops until it has seen both outcomes), and `scripts/e2e.py` passes (about 50 checks), also at full size. Comments were removed from all source files on 2026-11-04; this file and README.md are the documentation.
 
 ---
 
@@ -36,14 +36,15 @@ Built and verified:
 - Blind-signature issuance with per-denomination RSA keys (1, 5, 10).
 - Withdrawal **tag** `T = H(a || s)` for tracing double spenders.
 - Schnorr-style payment proof bound to the receiver; extraction of `(a, s)` from two transcripts.
-- Bank: accounts, withdraw (debit + tag log + blind sign), deposit (verify, spent-coin DB, duplicate / double-spend handling, tracing), flagged accounts.
+- Bank: accounts, cut-and-choose withdraw (k = 10 candidates, open k-1, check, then debit + tag log + blind sign), deposit (verify, spent-coin DB, duplicate / double-spend handling, tracing), flagged accounts.
+- All randomness from OpenSSL `RAND_bytes` (no Mersenne Twister).
 - Three networked programs: `bank_server`, `app_server`, `wallet_agent` (with local web UI at `ui/index.html`).
-- Full-domain hash for signing; RNG seeded from OS entropy.
+- Full-domain hash for signing.
 - UI features: Generate, Transfer (live protocol steps), Redeem, **Deposit** (pays the coin to yourself and redeems it), "allow re-spending a spent coin" demo toggle, history list.
 - Usernames: letters/digits/underscore, 3-20 chars, case-insensitive unique.
 - Paying yourself is allowed.
 
-Not built (see sections 12 and 13): SQLite for bank/app (they still use JSON files), coins following the login (encrypted vault), cut-and-choose, TLS, "what the bank sees" panel, final report, secure-random for all secrets, encrypting the local wallet file.
+Not built (see sections 12 and 13): SQLite for bank/app (they still use JSON files), coins following the login (encrypted vault), TLS, "what the bank sees" panel, encrypting the local wallet file. The final report draft (LaTeX) lives outside the repo at `C:\IITK\CS670\report\report.tex`; its limitations section predates cut-and-choose and the RNG change.
 
 Git: `main` = `origin/main` = `ee5fc42`. Working tree clean at the time of writing (this file was added after).
 
@@ -97,23 +98,26 @@ Coin { serial: string (128-bit random, lowercase hex), A = g^a mod p, S = g^s mo
 ```
 Secrets `a, s` are random in `[1, q-1]` and stay in the wallet (`WalletCoin`). Only `A`, `S` appear in the coin.
 
-### 4.3 Withdrawal (blind signature + tag)
+### 4.3 Withdrawal (blind signature + tag, with cut-and-choose)
 
-Wallet side (`Wallet::prepare_withdrawal`):
+Each withdrawal prepares `k` candidates (default 10; bank option `--candidates`, advertised in `/params` as `withdraw_candidates`). One candidate is made as below.
+
+Wallet side, per candidate (`Wallet::prepare_withdrawal`; `prepare_batch` makes `k` of them):
 1. Sample `a, s` uniform in `[1, q-1]`; `A = g^a`, `S = g^s`; random 128-bit `serial`.
 2. `m = FDH_n(serial, A, S)` (full-domain hash, below) with `n` = modulus of the requested denomination.
 3. Random `r` coprime to `n`; blinded message `m' = m * r^e mod n`.
 4. Tag `T = H_tag(a, s)` (below).
 5. Send `(denomination, m', T)`; keep `(serial, A, S, m, r, a, s, T)` in a `PendingWithdrawal`.
 
-Bank side (`Bank::withdraw`, in this order, so a failure never debits or logs):
-1. Reject unknown denomination.
-2. Reject a tag already in the log (`"Bank: withdrawal tag already used"`).
-3. Debit the account (`debit` throws on unknown account, negative amount, insufficient balance). The debit amount equals the denomination.
-4. Log `hex(T) -> account`.
-5. Return `s' = m'^d mod n`.
+Bank, round 1 (`Bank::begin_withdrawal(user, denom, candidates)` -> keep index `j`): reject unknown denomination; reject unless exactly `k` candidates; reject unknown account / insufficient balance (checked, not debited); reject if this account already has an open withdrawal; reject a blinded value outside `[1, n)`; reject any tag already in the log or repeated in the batch. Then pick `j` uniformly (`Rng::index_below`) and hold `{denom, candidates, j}` in memory (`pending_`, keyed by account; not persisted, cleared by a bank restart).
 
-Wallet (`finish_withdrawal`): `sig = s' * r^-1 mod n`; the wallet agent verifies `sig^e mod n == m mod n` before storing; stores coin + `(a, s)`.
+Wallet: `Wallet::open_batch(batch, j)` returns `(index, serial, a, s, r)` for every `i != j`.
+
+Bank, round 2 (`Bank::finish_withdrawal(user, openings)`): remove the open withdrawal (single use). Check exactly `k-1` openings covering every index except `j`; for each: `a, s` in `[1, q)`, `r` in `[1, n)` with `gcd(r, n) = 1`, `FDH_n(serial, g^a, g^s) * r^e mod n == m'_i`, and `H_tag(a, s) == T_i`. Any failure: add the account to `flagged_` and throw `"Bank: cut-and-choose check failed (...); account flagged"` (the server saves state before replying). All pass: debit the denomination, log `hex(T_j) -> account`, return `s' = m'_j^d mod n`.
+
+Wallet (`finish_withdrawal` on candidate `j`): `sig = s' * r^-1 mod n`; the wallet agent verifies `sig^e mod n == m mod n` before storing; stores coin + `(a, s)`. The other `k-1` candidates are discarded. If the finish call fails in transport, the agent keeps the batch in memory and completes it on the next Generate.
+
+A wallet with one false tag among `k` candidates passes only if the bank keeps that candidate: probability `1/k`. Refusing a new withdrawal while one is open stops "abandon and retry".
 
 **Full-domain hash** (`HashUtils::coin_message(serial, A, S, n)`):
 ```
@@ -159,8 +163,8 @@ Spent-coin database is keyed by **serial**.
 
 ### 4.6 Known cryptographic limitations
 
-- **Tag is trusted (the "k = 1" simple mode).** The bank sees only the blinded `m'`, so it cannot check that the tag equals `H(a||s)` for the coin it signs. A wallet that lies about its tag double-spends and is detected but cannot be named (test `[limitation]` documents this). A dishonest bank could also log a false tag. Planned optional hardening: cut-and-choose (wallet sends `k` blinded candidates, bank opens `k-1`, cheating succeeds with probability `1/k`).
-- **RNG:** GMP Mersenne Twister seeded from 32 bytes of OpenSSL `RAND_bytes` (`Rng::instance()`). Better than clock seeding but not a CSPRNG. Wallet secrets, blinding factors and RSA primes all come from it.
+- **Cut-and-choose is probabilistic.** With `k = 10`, a wallet with one false tag slips through with probability 1/10; if it then double-spends, the bank detects it but cannot name it (test `[limitation]` shows both outcomes). The other 9 times out of 10 it is caught and flagged at withdrawal. An open withdrawal blocks further withdrawals on that account until the bank restarts (an honest wallet that crashes mid-withdrawal is stuck until then). A dishonest bank could still log a false tag.
+- **RNG:** fixed. `Rng` draws every value from OpenSSL `RAND_bytes` (rejection sampling for "below n"); GMP's Mersenne Twister is no longer used. Previously the serial and challenge nonce (public) came from the same Mersenne Twister as `a, s`, which in principle let an observer predict future secrets.
 - **Wallet secrets stored unencrypted** in the local SQLite file.
 - No TLS; plain HTTP.
 - Group generation not the verifiable FIPS 186 method.
@@ -176,7 +180,8 @@ Spent-coin database is keyed by **serial**.
 | File | Contents |
 |---|---|
 | `bigint.hpp` | `BigInt` RAII wrapper over `mpz_t`. Statics: `add`, `sub`, `mulmod`, `powmod`, `invmod` (throws), `mod` (result in [0,n)), `gcd`, `random_below(n, rng)` (uniform in [1,n-1]), `from_bytes` (big-endian). Members: `==`, `!=`, `to_string(base)`, `bit_length()`, public `mpz_t v`. Constructors from `long` and `(string, base)` (throws on bad numeral). |
-| `rng.hpp` | `Rng::instance()` returns the shared `gmp_randstate_t&` (Mersenne Twister seeded from `RAND_bytes`); `Rng::reseed(seed)` for tests. Not thread-safe (servers guard use with a mutex). |
+| `rng.hpp` | `Rng::instance()` returns `Rng&`, a stateless wrapper over OpenSSL `RAND_bytes`: `bytes`, `bits(mpz, n)`, `below(mpz, n)` (rejection sampling), `index_below(n)`. Every function that needs randomness takes `Rng&`. |
+| `cut_choose.hpp` | `kDefaultWithdrawCandidates = 10`; `WithdrawCandidate {blinded_m, tag}`; `CandidateOpening {index, serial, a, s, r}`. |
 | `group_setup.hpp` | `GroupParams {p, q, g}`; `GroupSetup::generate(q_bits, p_bits, rng)`. |
 | `rsa_keygen.hpp` | `RSAKeyPair {n, e, d, modulus_bits}`; `RSAKeyGen::generate(bits, rng)` (textbook RSA, e = 65537, d from phi(n)). |
 | `hash_utils.hpp` | `hash_coin_identifier` (plain digest, not signed), `coin_message(serial,A,S,n)` (FDH, what is signed), `hash_tag(a,s)`, `hash_challenge(receiver_id,time,nonce,q)`. |
@@ -184,7 +189,7 @@ Spent-coin database is keyed by **serial**.
 | `transcript.hpp` | `struct Transcript {coin, receiver_id, time, nonce, y}` with `challenge(q)` (recomputes x). |
 | `public_keys.hpp` | `PublicKeySource` interface (`has_denomination`, `public_modulus`, `public_exponent`; non-virtual `verify_check`, `verify`). `PublicKeyRing` = client-side registry (`add`, `denominations`). `Bank` implements the interface too. Wallet and Merchant take a `PublicKeySource&`, so they work from published public keys without a `Bank`. |
 | `zkp.hpp` | `Schnorr`: `is_group_element`, `is_valid_challenge`, `respond(a,s,x,q)`, `verify(grp,A,S,x,y)`, `extract(grp,x1,y1,x2,y2,a_out,s_out)`. |
-| `bank.hpp` | `enum DepositStatus {Accepted, Duplicate, DoubleSpend, Invalid}`; `DepositResult {status, detail, flagged_account, a, s}`; `class Bank : PublicKeySource`: `set_group`, `add_denomination`, `denominations`, `blind_sign`, `withdraw(user, denom, blinded, tag)`, `deposit(transcript)`, `is_flagged`, `flagged_accounts`, `spent_count`, `has_account`, `has_group`, `group()`, ledger: `set_balance`, `balance`, `debit`. Private: `keys_` (denom -> RSAKeyPair), `balances_`, `group_`, `tag_log_` (hex tag -> account), `spent_` (serial -> Transcript), `flagged_`. `friend struct BankPersistence` (defined in `serialize.hpp`). |
+| `bank.hpp` | `enum DepositStatus {Accepted, Duplicate, DoubleSpend, Invalid}`; `DepositResult {status, detail, flagged_account, a, s}`; `class Bank : PublicKeySource`: `set_group`, `add_denomination`, `denominations`, `blind_sign`, `withdraw_candidates`/`set_withdraw_candidates`, `begin_withdrawal(user, denom, candidates)` -> keep index, `finish_withdrawal(user, openings)` -> blind signature, `has_open_withdrawal`, `open_withdrawal_index`, `deposit(transcript)`, `is_flagged`, `flagged_accounts`, `spent_count`, `has_account`, `has_group`, `group()`, ledger: `set_balance`, `balance`, `debit`. Private: `keys_` (denom -> RSAKeyPair), `balances_`, `group_`, `tag_log_` (hex tag -> account), `spent_` (serial -> Transcript), `flagged_`. `friend struct BankPersistence` (defined in `serialize.hpp`). |
 | `wallet.hpp` | `PendingWithdrawal`, `WalletCoin {coin, a, s, spent}`, `class Wallet`: `prepare_withdrawal(denom, keys, pending)`, `unblind(keys, pending, blind_sig)`, `finish_withdrawal(...)` (returns `WalletCoin`), `pay(wc, receiver_id, time, nonce, y_out)`. |
 | `merchant.hpp` | `PaymentSession {coin, time, nonce, x}`; `class Merchant(receiver_id, group, keys, rng)`: `begin_payment(coin, time, session)`, `finish_payment(session, y, transcript)`. |
 | `serialize.hpp` | JSON helpers in `namespace wire`: `hex`/`from_hex`, `coin_to/from_json`, `transcript_to/from_json`, `group_to/from_json`, `params_to_json`, `ring_from_json`. `struct BankPersistence {save(Bank) -> json; load(Bank&, json)}` (whole-bank JSON snapshot; to be replaced by SQLite). |
@@ -226,7 +231,8 @@ Header `X-Internal-Key: <key>` is required on everything except `/health` and `/
 | `GET /params` | | `{"group":{"p":hex,"q":hex,"g":hex},"denominations":[{"denomination":1,"n":hex,"e":"10001"},{"denomination":5,...},{"denomination":10,...}]}` | |
 | `POST /accounts` (internal) | `{"name":"alice","balance":100}` | `{"ok":true}` | 409 `"account exists"`; 400 negative balance |
 | `GET /accounts/<name>/balance` (internal) | | `{"balance":95}` | 400 unknown account |
-| `POST /withdraw` (internal) | `{"account":"alice","denomination":5,"blinded_m":hex,"tag":hex}` | `{"blind_signature":hex}` | 400 `"Bank: unknown denomination"`, `"Bank: withdrawal tag already used"`, `"Bank: unknown account: x"`, `"Bank: insufficient balance for account: x"` |
+| `POST /withdraw/begin` (internal) | `{"account":"alice","denomination":5,"candidates":[{"blinded_m":hex,"tag":hex}, ... k of them]}` | `{"keep_index":j}` | 400 `"Bank: unknown denomination"`, `"Bank: expected 10 withdrawal candidates"`, `"Bank: withdrawal tag already used"`, `"Bank: a previous withdrawal is still open; finish it first"`, `"Bank: unknown account: x"`, `"Bank: insufficient balance for account: x"` |
+| `POST /withdraw/finish` (internal) | `{"account":"alice","openings":[{"index":i,"serial":str,"a":hex,"s":hex,"r":hex}, ... every i != j]}` | `{"blind_signature":hex}` | 400 `"Bank: no withdrawal in progress"`, `"Bank: cut-and-choose check failed (<reason>); account flagged"` |
 | `POST /deposit` (internal) | `{"transcript":{"coin":{"serial":hex,"A":hex,"S":hex,"signature":hex,"denomination":5},"receiver_id":"bob","time":"2026-...Z","nonce":hex,"y":hex}}` | `{"status":"accepted"\|"duplicate"\|"double_spend"\|"invalid","detail":str,"flagged_account":str,"amount":5}` | |
 | `GET /admin/state` (internal) | | `{"balances":{"alice":94,...},"flagged":["alice"],"spent_count":3}` | |
 
@@ -244,7 +250,8 @@ Auth: header `X-Token: <token>` (token returned by signup/login: 16 random bytes
 | `POST /login` | `{"username","password"}` | Case-insensitive match; returns the **registered spelling** in `username`. 401 `"wrong username or password"`. |
 | `GET /params` | | Proxy of bank `/params`. |
 | `GET /balance` (token) | | Proxy of `/accounts/<me>/balance`. |
-| `POST /withdraw` (token) | `{"denomination","blinded_m","tag"}` | Forwards to bank `/withdraw` with `account` = session user. Returns the bank's response. |
+| `POST /withdraw/begin` (token) | `{"denomination","candidates"}` | Forwards to bank `/withdraw/begin` with `account` = session user. |
+| `POST /withdraw/finish` (token) | `{"openings"}` | Forwards to bank `/withdraw/finish` with `account` = session user. |
 | `POST /redeem` (token) | `{"transcript":{...}}` | 403 unless `transcript.receiver_id` == session user; else forwards to bank `/deposit`. |
 | `GET /users/<name>` (token) | | `{"exists":bool,"online":bool,"username":"canonical"}`. "Online" = polled the inbox within the last 30 s. |
 | `POST /transfer/send` (token) | `{"to","type","transfer_id","payload"}` | `type` in `coin\|challenge\|response\|accepted\|reject`. Resolves `to` case-insensitively. 404 `"unknown user: x"`, 409 `"<name> is offline"`, 429 inbox full (100). Queues `{"from":<session user>,"type","transfer_id","payload"}` in the target's mailbox. Returns `{"ok":true}`. |
@@ -269,14 +276,17 @@ UI **Deposit** button = JS: `POST /api/transfer {to: me, coin_id}` then `GET /ap
 
 ```
 UI -> wallet:  POST /api/generate {denomination:5}
-wallet:        a,s,serial,A,S,m=FDH_n(...), r, m'=m*r^e, T=H(a,s)
-wallet -> app: POST /withdraw {denomination:5, blinded_m:hex(m'), tag:hex(T)}   [X-Token]
-app -> bank:   POST /withdraw {account:<session user>, denomination, blinded_m, tag}  [X-Internal-Key]
-bank:          check denom, tag unused, debit, log T->account, s' = m'^d
+wallet:        k times: a,s,serial,A,S,m=FDH_n(...), r, m'=m*r^e, T=H(a,s)
+wallet -> app -> bank: POST /withdraw/begin {denomination:5, candidates:[{blinded_m, tag} x k]}
+bank:          checks (no debit), picks j, remembers the batch
+bank -> app -> wallet: {keep_index: j}
+wallet -> app -> bank: POST /withdraw/finish {openings:[{index, serial, a, s, r} for i != j]}
+bank:          re-derives every opened m'_i and T_i; any mismatch -> flag + 400
+               all good -> debit, log T_j->account, s' = m'_j^d
 bank -> app -> wallet: {blind_signature: hex(s')}
-wallet:        sig = s'*r^-1; verify sig^e == m; INSERT coin (+ a, s) into SQLite; history "generated"
+wallet:        sig = s'*r_j^-1; verify sig^e == m_j; INSERT coin j (+ a, s) into SQLite; history "generated"
 ```
-The bank and app never see `serial`, `A`, `S`, `m`, `r`, `a`, `s`.
+The bank and app never see `serial`, `A`, `S`, `m`, `r`, `a`, `s` of the kept candidate `j` (they do see them for the k-1 opened candidates, which are thrown away).
 
 ### 6.5 Sequence: transfer (payer P, receiver R, both logged in, both agents polling their inbox)
 
@@ -351,7 +361,7 @@ Environment (the user's machine): Windows 11; project at `C:\IITK\CS670\project`
 
 ```sh
 make                  # demos, unit tests, bank_server, app_server, wallet_agent  (binaries in build/)
-make run-tests        # unit tests  ->  "All tests passed (376 assertions in 74 test cases)"
+make run-tests        # unit tests  ->  "All tests passed (~410 assertions in 80 test cases)"
 make e2e              # builds servers, runs scripts/e2e.py (small sizes); E2E_FULL=1 for full sizes
 scripts/run_demo.sh   # bank :9000, app :8000, wallet A :8081, wallet B :8082; --fast for small sizes
 ./build/wallet_agent --port 8083 --data demo-data/wallet-c    # a third wallet
@@ -366,11 +376,11 @@ Ports used by tests: e2e uses bank 19000, app 18000, wallets 18081-18084.
 
 ## 9. Tests
 
-Unit tests (Catch2) in `tests/`, 74 test cases:
+Unit tests (Catch2) in `tests/`, 80 test cases:
 - `test_bigint.cpp` (11), `test_group_setup.cpp` (5), `test_rsa_keygen.cpp` (4), `test_hash_utils.cpp` (8, includes FDH tests: deterministic, in [0,n), fills >2000 bits for a 2047-bit n, depends on every field and on n).
 - `test_bank_wallet.cpp` (17): honest issuance, blindness, denominations, tamper/replay/other-bank attacks, ledger.
 - `test_zkp.cpp` (13): completeness, rejection cases, extraction, simulator, challenge/tag hash properties.
-- `test_clearance.cpp` (17): end-to-end in-process: withdraw/pay/redeem; double spend traced to the withdrawer; only the cheater is flagged; duplicate vs accusation; forged response; redirected transcript; wallet won't answer another receiver's challenge; forged signature; wrong denomination; honest wallet refuses re-spend; unknown receiver account; insufficient balance leaves no trace; repeated tag rejected; unknown denomination; the tag-lie limitation.
+- `test_clearance.cpp` (23): end-to-end in-process: withdraw/pay/redeem; double spend traced to the withdrawer; only the cheater is flagged; duplicate vs accusation; forged response; redirected transcript; wallet won't answer another receiver's challenge; forged signature; wrong denomination; honest wallet refuses re-spend; unknown receiver account; insufficient balance leaves no trace; logged tag reused; same tag twice in a batch; unknown denomination. Cut-and-choose: exactly k candidates; charged only after openings check out; one open withdrawal at a time, no finish without a start; false tags everywhere always caught; missing or wrong opening caught and flagged; one false tag caught unless kept (1/k), and when kept the double spend is untraceable.
 
 End-to-end `scripts/e2e.py` (starts real servers on temp ports; about 45 checks): [1] accounts (signup incl. capitalised "Erin", duplicate rejected, wrong password), [2] generate coins, [3] transfer and redeem, [4] double spend detected and traced (bank flags exactly alice), [5] forged/malformed requests (forged transcript invalid, redeem for someone else's id refused, withdraw without session refused, bank refuses calls without the internal key), [6] unknown/offline receivers and insufficient balance, [7] capitals / case-insensitive / paying yourself, [8] state survives a bank restart, [9] app server restart (wallet falls back to sign-in; accounts and local coins survive).
 
@@ -382,7 +392,7 @@ UI was exercised in a real browser (Puppeteer click-through): signup, generate, 
 
 - Wallet originally discarded `a, s` after computing `A, S` (fixed: `WalletCoin`).
 - Signing a 256-bit hash with textbook RSA (fixed: FDH).
-- Clock-seeded RNG (fixed: OS entropy seed).
+- Clock-seeded RNG (fixed: OS entropy seed), then Mersenne Twister for secrets (fixed: everything from `RAND_bytes`).
 - App server crashed when reloading `users.json` on restart: `for (auto& [k,v] : json::parse(raw).items())` dangles the temporary. Keep the parsed document alive in a variable. (Found by a restart test that e2e originally lacked.)
 - Rejected idea: `s` = account number (see 4.3).
 - A custodial/hosted wallet (server holds coins) was considered and rejected for the main design, because the operator would see every coin; see section 11.
@@ -393,7 +403,7 @@ UI was exercised in a real browser (Puppeteer click-through): signup, generate, 
 
 1. **Client-side wallet**: secrets and cryptography run on the user's machine (local C++ wallet agent with a local web UI). Reason: a wallet run by the operator would see and be able to spend every coin and would remove the double-spend demo.
 2. **App server is a gateway and relay**, bank is a separate server, bank reachable only with the internal key; the account comes from the session.
-3. **Simple tag mode (k = 1)** for tracing; cut-and-choose optional later.
+3. **Cut-and-choose withdrawal, k = 10** (built 2026-11-04; replaced the trusted-tag k = 1 mode).
 4. **Interactive proof**, receiver must be online; receiver-bound challenge.
 5. **Transfer means pay**; a received payment must be redeemed; coins are not passed on.
 6. **Deposit = pay yourself then redeem**; safe because the bank's spent database is the authority. A user who already paid the coin elsewhere and then deposits it is a double spender and is flagged.
@@ -432,7 +442,7 @@ Each mutating request (open account, withdraw, deposit) runs in one transaction 
 - One-command demo start (exists: `scripts/run_demo.sh`) and a written demo script/walkthrough.
 
 ### 12.4 Optional
-- Cut-and-choose (k > 1), TLS, a Dockerfile, an "amount" transfer that auto-picks coins, native Windows support.
+- TLS, a Dockerfile, an "amount" transfer that auto-picks coins, native Windows support.
 
 ---
 
@@ -440,8 +450,8 @@ Each mutating request (open account, withdraw, deposit) runs in one transaction 
 
 Highest priority first (the user wants these written simply for teammates who missed the discussion):
 
-1. **Trusting the tag.** A wallet can send a fake tag; then a double spend is detected but cannot be traced to a person. *Suggestion:* keep simple mode and state the limit; add cut-and-choose only if time remains.
-2. **Random numbers.** Secrets come from GMP's Mersenne Twister (seeded well, but not designed for secrets). *Suggestion:* draw all secrets (a, s, r, serials, RSA primes, nonces) from OpenSSL `RAND_bytes` directly (replace `mpz_urandomm/urandomb` uses behind `BigInt::random_below` and the keygen/group code). Small, contained change.
+1. **Trusting the tag.** Resolved with cut-and-choose (k = 10); the remaining 1/k chance is stated as a limitation.
+2. **Random numbers.** Resolved: all randomness from OpenSSL `RAND_bytes`.
 3. **App server sees who pays whom.** *Suggestion:* keep; state the honest-operator assumption in the report.
 4. **No TLS.** *Suggestion:* localhost-only for the demo, state it; add TLS only if hosting publicly.
 5. **Wallet file unencrypted** (anyone with the file can spend the coins). *Suggestion:* encrypt it with a password-derived key; reuse the vault encryption.

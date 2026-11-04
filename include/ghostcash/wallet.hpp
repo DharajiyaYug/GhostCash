@@ -2,11 +2,14 @@
 
 #include "ghostcash/bigint.hpp"
 #include "ghostcash/coin.hpp"
+#include "ghostcash/cut_choose.hpp"
 #include "ghostcash/public_keys.hpp"
 #include "ghostcash/hash_utils.hpp"
+#include "ghostcash/rng.hpp"
 #include "ghostcash/zkp.hpp"
 #include <gmp.h>
-#include <sstream>
+#include <stdexcept>
+#include <vector>
 
 struct PendingWithdrawal {
     int denomination;
@@ -19,6 +22,11 @@ struct PendingWithdrawal {
     BigInt tag;
 };
 
+struct WithdrawalBatch {
+    int denomination = 0;
+    std::vector<PendingWithdrawal> candidates;
+};
+
 struct WalletCoin {
     Coin coin;
     BigInt a, s;
@@ -27,7 +35,7 @@ struct WalletCoin {
 
 class Wallet {
 public:
-    Wallet(BigInt group_p, BigInt group_q, BigInt group_g, gmp_randstate_t& rng)
+    Wallet(BigInt group_p, BigInt group_q, BigInt group_g, Rng& rng)
         : p_(std::move(group_p)), q_(std::move(group_q)), g_(std::move(group_g)), rng_(rng) {}
 
     BigInt prepare_withdrawal(int denomination, const PublicKeySource& keys, PendingWithdrawal& out_pending) {
@@ -36,7 +44,7 @@ public:
         BigInt A = BigInt::powmod(g_, a, p_);
         BigInt S = BigInt::powmod(g_, s, p_);
 
-        std::string serial = random_serial();
+        std::string serial = BigInt::random_bits(128, rng_).to_string(16);
 
         const BigInt& n = keys.public_modulus(denomination);
         const BigInt& e = keys.public_exponent(denomination);
@@ -56,6 +64,33 @@ public:
 
         out_pending = PendingWithdrawal{denomination, serial, A, S, m_mod_n, r, blinded_m, a, s, tag};
         return blinded_m;
+    }
+
+    std::vector<WithdrawCandidate> prepare_batch(int denomination, const PublicKeySource& keys, int k,
+                                                 WithdrawalBatch& out_batch) {
+        if (k < 1) throw std::invalid_argument("Wallet: need at least one withdrawal candidate");
+        out_batch = WithdrawalBatch{denomination, {}};
+        std::vector<WithdrawCandidate> sent;
+        for (int i = 0; i < k; ++i) {
+            PendingWithdrawal p;
+            prepare_withdrawal(denomination, keys, p);
+            sent.push_back(WithdrawCandidate{p.blinded_m, p.tag});
+            out_batch.candidates.push_back(std::move(p));
+        }
+        return sent;
+    }
+
+    static std::vector<CandidateOpening> open_batch(const WithdrawalBatch& batch, size_t keep_index) {
+        if (keep_index >= batch.candidates.size()) {
+            throw std::invalid_argument("Wallet: the bank chose a candidate index out of range");
+        }
+        std::vector<CandidateOpening> openings;
+        for (size_t i = 0; i < batch.candidates.size(); ++i) {
+            if (i == keep_index) continue;
+            const PendingWithdrawal& p = batch.candidates[i];
+            openings.push_back(CandidateOpening{i, p.serial, p.a, p.s, p.r});
+        }
+        return openings;
     }
 
     Coin unblind(const PublicKeySource& keys, const PendingWithdrawal& pending, const BigInt& blind_signature) const {
@@ -81,14 +116,5 @@ public:
 
 private:
     BigInt p_, q_, g_;
-    gmp_randstate_t& rng_;
-
-    std::string random_serial() {
-        mpz_t tmp;
-        mpz_init(tmp);
-        mpz_urandomb(tmp, rng_, 128);
-        BigInt r; mpz_set(r.v, tmp);
-        mpz_clear(tmp);
-        return r.to_string(16);
-    }
+    Rng& rng_;
 };

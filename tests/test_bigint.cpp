@@ -45,7 +45,7 @@ TEST_CASE("BigInt: gcd basic cases", "[bigint]") {
 }
 
 TEST_CASE("BigInt: random_below stays in range and is non-zero", "[bigint]") {
-    gmp_randstate_t& rng = Rng::instance();
+    Rng& rng = Rng::instance();
     BigInt n(1000);
     for (int i = 0; i < 100; ++i) {
         BigInt r = BigInt::random_below(n, rng);

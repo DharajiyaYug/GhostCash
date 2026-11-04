@@ -115,6 +115,9 @@ struct Agent {
     std::unique_ptr<Db> db;
     std::map<std::string, Incoming> incoming;
     std::map<std::string, Outgoing> outgoing;
+    int withdraw_candidates = kDefaultWithdrawCandidates;
+    std::unique_ptr<WithdrawalBatch> open_batch;
+    size_t open_keep = 0;
 };
 
 Agent ag;
@@ -304,6 +307,8 @@ void start_session(const std::string& username, const std::string& token) {
     ag.group = wire::group_from_json(params.at("group"));
     ag.ring = PublicKeyRing();
     wire::ring_from_json(ag.ring, params.at("denominations"));
+    ag.withdraw_candidates = params.value("withdraw_candidates", kDefaultWithdrawCandidates);
+    ag.open_batch.reset();
 
     std::filesystem::create_directories(ag.data_dir);
     ag.db.reset();
@@ -379,6 +384,7 @@ int main(int argc, char** argv) {
         ag.db.reset();
         ag.wallet.reset();
         ag.merchant.reset();
+        ag.open_batch.reset();
         reply(res, 200, json{{"ok", true}});
     }));
 
@@ -428,13 +434,36 @@ int main(int argc, char** argv) {
             return;
         }
 
-        PendingWithdrawal pending;
-        BigInt blinded = ag.wallet->prepare_withdrawal(denom, ag.ring, pending);
+        if (!ag.open_batch) {
+            auto batch = std::make_unique<WithdrawalBatch>();
+            auto candidates = ag.wallet->prepare_batch(denom, ag.ring, ag.withdraw_candidates, *batch);
+            int status = 0;
+            json r = app_call("POST", "/withdraw/begin",
+                              {{"denomination", denom}, {"candidates", wire::candidates_to_json(candidates)}},
+                              status);
+            if (status != 200) {
+                fail(res, status, r.value("error", "withdrawal failed"));
+                return;
+            }
+            ag.open_keep = r.at("keep_index").get<size_t>();
+            ag.open_batch = std::move(batch);
+        }
+
+        const size_t keep = ag.open_keep;
+        if (keep >= ag.open_batch->candidates.size()) {
+            ag.open_batch.reset();
+            fail(res, 502, "the bank chose a candidate that does not exist");
+            return;
+        }
+        const size_t k = ag.open_batch->candidates.size();
+        denom = ag.open_batch->denomination;
 
         int status = 0;
-        json r = app_call("POST", "/withdraw",
-                          {{"denomination", denom}, {"blinded_m", wire::hex(blinded)}, {"tag", wire::hex(pending.tag)}},
+        json r = app_call("POST", "/withdraw/finish",
+                          {{"openings", wire::openings_to_json(Wallet::open_batch(*ag.open_batch, keep))}},
                           status);
+        PendingWithdrawal pending = ag.open_batch->candidates[keep];
+        ag.open_batch.reset();
         if (status != 200) {
             fail(res, status, r.value("error", "withdrawal failed"));
             return;
@@ -450,7 +479,9 @@ int main(int argc, char** argv) {
         ag.db->query("INSERT INTO coins(serial, denom, coin_json, a, s, created) VALUES(?,?,?,?,?,?)",
                      {wc.coin.serial, std::to_string(denom), wire::coin_to_json(wc.coin).dump(),
                       wc.a.to_string(16), wc.s.to_string(16), net::now_iso()});
-        add_history("generated", "withdrew a " + std::to_string(denom) + "-coin " + short_serial(wc.coin.serial));
+        add_history("generated", "withdrew a " + std::to_string(denom) + "-coin " + short_serial(wc.coin.serial) +
+                                     " (bank checked " + std::to_string(k - 1) + " of " + std::to_string(k) +
+                                     " candidates)");
         reply(res, 200, json{{"ok", true}, {"serial", wc.coin.serial}, {"denomination", denom}});
     }));
 

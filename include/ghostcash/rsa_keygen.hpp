@@ -12,7 +12,7 @@ struct RSAKeyPair {
 
 class RSAKeyGen {
 public:
-    static RSAKeyPair generate(int n_bits, gmp_randstate_t& rng) {
+    static RSAKeyPair generate(int n_bits, Rng& rng) {
         RSAKeyPair kp;
         kp.modulus_bits = n_bits;
         kp.e = BigInt(65537);
@@ -47,12 +47,12 @@ public:
     }
 
 private:
-    static BigInt random_prime(int bits, gmp_randstate_t& rng, const BigInt& e) {
+    static BigInt random_prime(int bits, Rng& rng, const BigInt& e) {
         mpz_t candidate, p_minus_1, g;
         mpz_inits(candidate, p_minus_1, g, nullptr);
 
         for (;;) {
-            mpz_urandomb(candidate, rng, bits);
+            rng.bits(candidate, bits);
             mpz_setbit(candidate, bits - 1);
             mpz_setbit(candidate, bits - 2);
             mpz_setbit(candidate, 0);

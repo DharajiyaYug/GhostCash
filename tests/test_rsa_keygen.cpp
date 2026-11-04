@@ -3,21 +3,21 @@
 #include "ghostcash/rng.hpp"
 
 TEST_CASE("RSAKeyGen: modulus has the requested bit length", "[rsa_keygen]") {
-    gmp_randstate_t& rng = Rng::instance();
+    Rng& rng = Rng::instance();
     RSAKeyPair kp = RSAKeyGen::generate(512, rng);
 
     REQUIRE(kp.n.bit_length() == 512);
 }
 
 TEST_CASE("RSAKeyGen: public exponent is fixed at 65537", "[rsa_keygen]") {
-    gmp_randstate_t& rng = Rng::instance();
+    Rng& rng = Rng::instance();
     RSAKeyPair kp = RSAKeyGen::generate(512, rng);
 
     REQUIRE(kp.e == BigInt(65537));
 }
 
 TEST_CASE("RSAKeyGen: d is a genuine RSA private exponent (encrypt/decrypt round-trip)", "[rsa_keygen]") {
-    gmp_randstate_t& rng = Rng::instance();
+    Rng& rng = Rng::instance();
     RSAKeyPair kp = RSAKeyGen::generate(512, rng);
 
     BigInt message(424242);
@@ -28,7 +28,7 @@ TEST_CASE("RSAKeyGen: d is a genuine RSA private exponent (encrypt/decrypt round
 }
 
 TEST_CASE("RSAKeyGen: repeated generation produces different keys", "[rsa_keygen]") {
-    gmp_randstate_t& rng = Rng::instance();
+    Rng& rng = Rng::instance();
     RSAKeyPair kp1 = RSAKeyGen::generate(512, rng);
     RSAKeyPair kp2 = RSAKeyGen::generate(512, rng);
 

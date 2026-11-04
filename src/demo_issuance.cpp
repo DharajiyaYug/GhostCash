@@ -8,7 +8,7 @@
 #include <iostream>
 
 int main() {
-    gmp_randstate_t& rng = Rng::instance();
+    Rng& rng = Rng::instance();
 
     std::cout << "=== GhostCash: Blind Signature Issuance Demo ===\n\n";
 

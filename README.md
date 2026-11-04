@@ -14,9 +14,13 @@ decisions.
 - A coin is `(serial, A = g^a, S = g^s, bank signature)`. The bank signs a
   full-domain hash of those fields **blind**: it never sees the coin. Its value
   comes from which denomination key signed it.
-- **Generate (withdraw):** the wallet blinds the coin, sends it to the bank
-  with a tag `T = H(a || s)`, the bank debits the account and logs `T -> account`,
-  and the wallet unblinds the signature.
+- **Generate (withdraw), with cut-and-choose:** the wallet prepares `k = 10`
+  blinded candidate coins, each with a tag `T = H(a || s)`. The bank picks one
+  at random to keep and the wallet opens the other nine; the bank checks that
+  each opened candidate is well formed and its tag is honest. Only then does it
+  debit the account, log the kept candidate's tag `T -> account` and sign it
+  blind. A wallet with a false tag is caught (and flagged) with probability
+  `(k-1)/k`. The wallet unblinds the signature.
 - **Transfer (pay):** wallet-to-wallet, relayed by the app, no bank contact.
   The receiver checks the signature, sends a challenge `x = H(receiver, time, nonce)`,
   and the payer answers `y = s + a*x`. The receiver checks `g^y == S * A^x`.
@@ -79,14 +83,15 @@ create an account in each (new accounts get a simulated balance of 100), then:
 Each program can also be started by hand:
 
 ```sh
-./build/bank_server  --port 9000 --state bank_state.json --key dev-internal-key [--fast]
+./build/bank_server  --port 9000 --state bank_state.json --key dev-internal-key --candidates 10 [--fast]
 ./build/app_server   --port 8000 --bank-host 127.0.0.1 --bank-port 9000 --key dev-internal-key \
                      --users users.json --start-balance 100
 ./build/wallet_agent --port 8081 --app-host 127.0.0.1 --app-port 8000 --data ./wallet-data --ui ./ui
 ```
 
 `--fast` uses small crypto sizes. `--key` is the shared secret the app server
-uses to call the bank; it must match on both.
+uses to call the bank; it must match on both. `--candidates` is `k`, the number
+of cut-and-choose candidates per withdrawal.
 
 ## Programs
 
@@ -102,12 +107,14 @@ it sees the coin and who paid whom (the honest-operator assumption).
 ## Library layout (`include/ghostcash/`)
 
 ```
-bigint, rng, group_setup, rsa_keygen   primitives
+bigint, group_setup, rsa_keygen        primitives
 hash_utils                             full-domain hash for signing, tag, challenge
 coin, transcript                       data types
 public_keys                            bank public keys / signature check (PublicKeySource)
-bank                                   blind signing, accounts, withdraw(tag), deposit(trace)
-wallet                                 coin generation, blinding, tag, answering challenges
+rng                                    all randomness, from OpenSSL RAND_bytes (CSPRNG)
+cut_choose                             withdrawal candidate and opening types
+bank                                   blind signing, accounts, cut-and-choose withdrawal, deposit(trace)
+wallet                                 coin generation, blinding, candidates and openings, answering challenges
 merchant                               receiver side: verify coin, challenge, verify response
 zkp                                    Schnorr proof: respond / verify / extract
 serialize                              JSON wire format and bank-state persistence
@@ -129,14 +136,18 @@ tests; `scripts/e2e.py` is the end-to-end test.
 
 ## Known limitations
 
-- **Trusted tag (`k = 1`).** The bank cannot check that the tag a wallet sends
-  really is `H(a || s)` for the coin it blind-signs, so a wallet that lies about
-  its tag double-spends untraceably (it is still detected). Cut-and-choose would
-  close this; it is not implemented. A dishonest bank could also log a false tag
-  against an account.
+- **Cut-and-choose is probabilistic.** A wallet that puts one false tag among its
+  `k` candidates escapes detection at withdrawal with probability `1/k` (10%);
+  if it then double-spends, the double spend is still detected but cannot be
+  traced. In the other cases it is caught and flagged at withdrawal. A larger `k`
+  lowers the chance at the cost of more work per withdrawal.
+- **One open withdrawal per account.** The bank refuses to start a new
+  withdrawal while one is still open, so a cheater cannot restart until the
+  bank keeps the false candidate. An open withdrawal is held in memory and is
+  cleared when the bank restarts.
+- A dishonest bank could log a false tag against an account.
 - **Operators are assumed honest.** The app sees who pays whom, and timing and
   denomination could be correlated by an operator who logs it.
-- **RNG.** GMP's Mersenne Twister, seeded from OS entropy; not a CSPRNG.
 - **Plain HTTP.** No TLS yet; use only on localhost.
 - **Coins live on the device.** A wallet's coins and secrets are in a local
   SQLite file per username (in the agent's `--data` directory). Logging in as the

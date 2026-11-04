@@ -12,7 +12,7 @@ struct GroupParams {
 
 class GroupSetup {
 public:
-    static GroupParams generate(int q_bits, int p_bits, gmp_randstate_t& rng) {
+    static GroupParams generate(int q_bits, int p_bits, Rng& rng) {
         if (p_bits <= q_bits) {
             throw std::invalid_argument("GroupSetup: p_bits must exceed q_bits");
         }
@@ -24,7 +24,7 @@ public:
         mpz_t k, candidate;
         mpz_inits(k, candidate, nullptr);
         for (;;) {
-            mpz_urandomb(k, rng, k_bits);
+            rng.bits(k, k_bits);
             mpz_setbit(k, k_bits - 1);
             if (mpz_odd_p(k)) mpz_add_ui(k, k, 1);
 
@@ -56,11 +56,11 @@ public:
     }
 
 private:
-    static BigInt random_prime(int bits, gmp_randstate_t& rng) {
+    static BigInt random_prime(int bits, Rng& rng) {
         mpz_t candidate;
         mpz_init(candidate);
         for (;;) {
-            mpz_urandomb(candidate, rng, bits);
+            rng.bits(candidate, bits);
             mpz_setbit(candidate, bits - 1);
             mpz_setbit(candidate, 0);
             if (mpz_probab_prime_p(candidate, 40) > 0) break;

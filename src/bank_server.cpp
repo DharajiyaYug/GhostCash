@@ -30,9 +30,11 @@ int main(int argc, char** argv) {
     const std::string state_path = args.get("state", "bank_state.json");
     const std::string internal_key = args.get("key", "dev-internal-key");
     const bool fast = args.has("fast");
+    const int candidates = args.get_int("candidates", kDefaultWithdrawCandidates);
 
-    gmp_randstate_t& rng = Rng::instance();
+    Rng& rng = Rng::instance();
     Bank bank;
+    bank.set_withdraw_candidates(candidates);
     std::mutex mu;
 
     auto save = [&]() { net::write_file_atomic(state_path, BankPersistence::save(bank).dump()); };
@@ -97,17 +99,34 @@ int main(int argc, char** argv) {
         reply(res, 200, json{{"balance", bank.balance(req.matches[1])}});
     }));
 
-    svr.Post("/withdraw", handler(true, [&](const httplib::Request& req, httplib::Response& res) {
+    svr.Post("/withdraw/begin", handler(true, [&](const httplib::Request& req, httplib::Response& res) {
         json body = json::parse(req.body);
         std::string account = body.at("account").get<std::string>();
         int denomination = body.at("denomination").get<int>();
-        BigInt blinded = wire::from_hex(body.at("blinded_m"));
-        BigInt tag = wire::from_hex(body.at("tag"));
+        auto cands = wire::candidates_from_json(body.at("candidates"));
 
-        BigInt sig = bank.withdraw(account, denomination, blinded, tag);
+        size_t keep = bank.begin_withdrawal(account, denomination, cands);
+        std::cout << "[bank] " << account << " started a withdrawal of " << denomination << ": "
+                  << cands.size() << " candidates, keeping #" << keep << "\n";
+        reply(res, 200, json{{"keep_index", keep}});
+    }));
+
+    svr.Post("/withdraw/finish", handler(true, [&](const httplib::Request& req, httplib::Response& res) {
+        json body = json::parse(req.body);
+        std::string account = body.at("account").get<std::string>();
+        auto openings = wire::openings_from_json(body.at("openings"));
+
+        BigInt sig;
+        try {
+            sig = bank.finish_withdrawal(account, openings);
+        } catch (const std::exception& e) {
+            save();
+            std::cout << "[bank] " << account << " withdrawal refused: " << e.what() << "\n";
+            throw;
+        }
         save();
-        std::cout << "[bank] " << account << " withdrew a " << denomination
-                  << " (balance " << bank.balance(account) << ")\n";
+        std::cout << "[bank] " << account << " opened " << openings.size()
+                  << " candidates, all honest; signed the kept one (balance " << bank.balance(account) << ")\n";
         reply(res, 200, json{{"blind_signature", wire::hex(sig)}});
     }));
 

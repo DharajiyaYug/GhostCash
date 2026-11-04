@@ -49,7 +49,7 @@ int prompt_denomination(const std::vector<int>& denoms) {
 
 int main(int argc, char** argv) {
     term::init(argc, argv);
-    gmp_randstate_t& rng = Rng::instance();
+    Rng& rng = Rng::instance();
 
     int requested_denomination = 0;
     for (int i = 1; i < argc; ++i) {

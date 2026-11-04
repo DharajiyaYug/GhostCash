@@ -168,8 +168,26 @@ def main():
         fake["transcript"]["receiver_id"] = "bob"
         s, r = http(APP_PORT, "/redeem", "POST", fake, {"X-Token": token})
         check("redeeming someone else's receiver id is refused", s == 403, (s, r))
-        s, r = http(APP_PORT, "/withdraw", "POST", {"denomination": 1, "blinded_m": "1", "tag": "1"})
+        s, r = http(APP_PORT, "/withdraw/begin", "POST", {"denomination": 1, "candidates": []})
         check("withdraw without a session is refused", s == 401, (s, r))
+
+        s, params = http(APP_PORT, "/params")
+        k = params.get("withdraw_candidates", 0)
+        check("bank asks for several withdrawal candidates (cut-and-choose)", k >= 2, params)
+        s, r = http(APP_PORT, "/signup", "POST", {"username": "mallory", "password": "pw-mallory"})
+        mtoken = r["token"]
+        fake_cands = [{"blinded_m": "2", "tag": format(0xbad0 + i, "x")} for i in range(k)]
+        s, r = http(APP_PORT, "/withdraw/begin", "POST", {"denomination": 1, "candidates": fake_cands},
+                    {"X-Token": mtoken})
+        check("bank accepts the candidates and picks one to keep", s == 200 and "keep_index" in r, (s, r))
+        keep = r.get("keep_index", 0)
+        openings = [{"index": i, "serial": "00", "a": "1", "s": "1", "r": "1"} for i in range(k) if i != keep]
+        s, r = http(APP_PORT, "/withdraw/finish", "POST", {"openings": openings}, {"X-Token": mtoken})
+        check("candidates with false tags fail the opening check", s == 400 and "cut-and-choose" in r.get("error", ""),
+              (s, r))
+        s, adm = http(BANK_PORT, "/admin/state", headers={"X-Internal-Key": INTERNAL_KEY})
+        check("the cheating account is flagged and not charged",
+              "mallory" in adm.get("flagged", []) and adm.get("balances", {}).get("mallory") == 100, adm)
         s, r = http(BANK_PORT, "/accounts/alice/balance")
         check("bank refuses calls without the internal key", s == 403, (s, r))
 
@@ -224,7 +242,7 @@ def main():
         after = {u: balance(u) for u in WALLET_PORTS}
         check("balances identical after restart", before == after, (before, after))
         s, adm = http(BANK_PORT, "/admin/state", headers={"X-Internal-Key": INTERNAL_KEY})
-        check("flagged account survives restart", adm.get("flagged") == ["alice"], adm)
+        check("flagged accounts survive restart", sorted(adm.get("flagged", [])) == ["alice", "mallory"], adm)
 
         print("\n[9] app server restart: sessions are lost, accounts and local coins are not")
         coins_before = len(wallet("alice", "/api/state")[1]["coins"])
