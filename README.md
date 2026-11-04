@@ -76,8 +76,17 @@ create an account in each (new accounts get a simulated balance of 100), then:
    When B and C both redeem, the second is rejected as a double spend and
    `logs/bank.log` shows the account the bank traced it to.
 
-Each program can also be started by hand. Their options (`--port`, `--state`,
-`--data`, ...) are documented at the top of each source file in `src/`.
+Each program can also be started by hand:
+
+```sh
+./build/bank_server  --port 9000 --state bank_state.json --key dev-internal-key [--fast]
+./build/app_server   --port 8000 --bank-host 127.0.0.1 --bank-port 9000 --key dev-internal-key \
+                     --users users.json --start-balance 100
+./build/wallet_agent --port 8081 --app-host 127.0.0.1 --app-port 8000 --data ./wallet-data --ui ./ui
+```
+
+`--fast` uses small crypto sizes. `--key` is the shared secret the app server
+uses to call the bank; it must match on both.
 
 ## Programs
 

@@ -1,37 +1,3 @@
-// app_server.cpp
-//
-// The GhostCash app server. It does three jobs and deliberately nothing else:
-//
-//   1. Accounts: signup/login. A user is a username + salted password hash;
-//      the app maps that user to the bank account of the same name.
-//   2. Gateway to the bank for the two operations that need an identity,
-//      withdraw (debit) and redeem (credit). The account is taken from the
-//      authenticated session, never from the request body.
-//   3. Routing of transfer messages between logged-in users (a mailbox per
-//      user, drained by long polling).
-//
-// It never sees coin secrets: wallets do all cryptography locally. During a
-// transfer it does see the coin and who sent it to whom -- the honest-operator
-// assumption in DESIGN.md. It stores no coin data: messages live in memory
-// until delivered.
-//
-//   POST /signup {username, password}            -> {token, username}
-//   POST /login  {username, password}            -> {token, username}
-//   GET  /params                                 bank group + public keys
-//   GET  /balance                       (token)  bank balance
-//   POST /withdraw {denomination, blinded_m, tag} (token)
-//   POST /redeem   {transcript}                  (token)
-//   GET  /users/<name>                  (token)  {exists, online, username}
-//
-// Usernames may contain capital letters but are unique ignoring case, and
-// login/lookup resolve any spelling to the registered one.
-//   POST /transfer/send {to, type, transfer_id, payload} (token)
-//   GET  /transfer/inbox?wait=<seconds> (token)  long poll
-//
-// Usage: app_server [--port 8000] [--bank-host 127.0.0.1] [--bank-port 9000]
-//                   [--key dev-internal-key] [--users users.json]
-//                   [--start-balance 100]
-
 #include "net_common.hpp"
 
 #include <openssl/crypto.h>
@@ -49,7 +15,6 @@ using net::reply;
 using Clock = std::chrono::steady_clock;
 
 namespace {
-
 struct User {
     std::string salt_hex;
     std::string hash_hex;
@@ -89,8 +54,7 @@ bool same_hash(const std::string& a, const std::string& b) {
 const std::set<std::string> kMessageTypes = {"coin", "challenge", "response", "accepted", "reject"};
 constexpr int kOnlineWindowSeconds = 30;
 constexpr size_t kMaxQueued = 100;
-
-} // namespace
+}
 
 int main(int argc, char** argv) {
     net::Args args(argc, argv);
@@ -104,15 +68,13 @@ int main(int argc, char** argv) {
     std::mutex mu;
     std::condition_variable cv;
     std::map<std::string, User> users;
-    std::map<std::string, std::string> sessions;               // token -> username
-    std::map<std::string, std::deque<json>> inbox;             // username -> undelivered messages
-    std::map<std::string, Clock::time_point> last_seen;        // username -> last inbox poll
+    std::map<std::string, std::string> sessions;
+    std::map<std::string, std::deque<json>> inbox;
+    std::map<std::string, Clock::time_point> last_seen;
 
     {
         std::string raw;
         if (net::read_file(users_path, raw)) {
-            // Keep the parsed document alive for the whole loop: iterating
-            // json::parse(raw).items() directly would dangle.
             json saved = json::parse(raw);
             for (auto& [name, u] : saved.items()) {
                 users[name] = User{u.at("salt").get<std::string>(), u.at("hash").get<std::string>()};
@@ -121,8 +83,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    // The registered spelling of `name` (case-insensitive match), or "".
-    // Caller holds `mu`.
     auto find_ci = [&](const std::string& name) -> std::string {
         auto lower = [](std::string s) {
             for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -135,14 +95,12 @@ int main(int argc, char** argv) {
         return "";
     };
 
-    // Caller holds `mu`.
     auto save_users = [&]() {
         json j = json::object();
         for (const auto& [name, u] : users) j[name] = {{"salt", u.salt_hex}, {"hash", u.hash_hex}};
         net::write_file_atomic(users_path, j.dump());
     };
 
-    // --- calls to the bank ------------------------------------------------
     auto bank_call = [&](const std::string& method, const std::string& path, const json& body,
                          int& status) -> json {
         httplib::Client cli(bank_host, bank_port);
@@ -156,15 +114,12 @@ int main(int argc, char** argv) {
         return json::parse(r->body);
     };
 
-    // Returns the username for the request's X-Token, or "" if not logged in.
     auto session_user = [&](const httplib::Request& req) -> std::string {
         std::lock_guard<std::mutex> lock(mu);
         auto it = sessions.find(req.get_header_value("X-Token"));
         return it == sessions.end() ? "" : it->second;
     };
 
-    // Wraps a handler: optional login requirement, and a catch-all that turns
-    // any exception into a 400 (502 if the bank can't be reached).
     auto handler = [&](bool needs_login,
                        std::function<void(const httplib::Request&, httplib::Response&, const std::string&)> fn) {
         return [&, needs_login, fn](const httplib::Request& req, httplib::Response& res) {
@@ -222,7 +177,6 @@ int main(int argc, char** argv) {
             users[username] = User{salt, hash_password(password, salt)};
         }
 
-        // Open the bank account; undo the reservation if that fails.
         int status = 0;
         json r;
         try {

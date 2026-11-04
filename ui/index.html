@@ -159,7 +159,7 @@ async function api(path, method, body) {
   const r = await fetch(path, { method: method || 'GET',
     headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
   let data = {};
-  try { data = await r.json(); } catch (e) { /* non-JSON reply */ }
+  try { data = await r.json(); } catch (e) {}
   if (!r.ok) throw new Error(data.error || ('request failed (' + r.status + ')'));
   return data;
 }
@@ -181,7 +181,6 @@ function render(s) {
   $('balance').textContent = '';
   $('balance').append('bank balance ', el('b', {}, s.bank_balance === null ? '?' : String(s.bank_balance)));
 
-  // denominations (rebuild only when they change)
   const denomKey = s.denominations.join(',');
   if ($('denoms').dataset.key !== denomKey) {
     $('denoms').dataset.key = denomKey; $('denoms').textContent = '';
@@ -190,7 +189,6 @@ function render(s) {
     }
   }
 
-  // coins
   const tbody = $('coins'); tbody.textContent = '';
   for (const c of s.coins) {
     tbody.append(el('tr', {},
@@ -202,7 +200,6 @@ function render(s) {
   }
   $('nocoins').classList.toggle('hidden', s.coins.length > 0);
 
-  // coin selector (keep selection while polling)
   const sel = $('coin'); const keep = sel.value; const force = $('force').checked;
   const usable = s.coins.filter(c => force || !c.spent);
   const sig = usable.map(c => c.id + ':' + c.spent).join(',');
@@ -215,7 +212,6 @@ function render(s) {
     if (usable.some(c => String(c.id) === keep)) sel.value = keep;
   }
 
-  // received payments
   const rb = $('received'); rb.textContent = '';
   for (const r of s.received) {
     const cls = r.status === 'redeemed' ? 'ok' : (r.status === 'rejected' ? 'bad' : 'warn');
@@ -226,7 +222,6 @@ function render(s) {
   }
   $('norecv').classList.toggle('hidden', s.received.length > 0);
 
-  // history
   const h = $('history'); h.textContent = '';
   for (const e of s.history) {
     h.append(el('div', {}, el('time', { class: 'muted' }, e.ts.replace('T', ' ').replace('Z', '')),
@@ -236,7 +231,7 @@ function render(s) {
 
 async function refresh() {
   if (busy) return;
-  try { render(await api('/api/state')); } catch (e) { /* agent restarting; try again */ }
+  try { render(await api('/api/state')); } catch (e) {}
 }
 
 async function guarded(fn) {
@@ -265,9 +260,6 @@ function redeem(id) {
   });
 }
 
-// Deposit = pay the coin to yourself, then redeem that payment. The bank sees
-// an ordinary payment and an ordinary redeem, so its double-spend checks apply
-// exactly as for any other coin.
 function deposit(coinId) {
   guarded(async () => {
     const t = await api('/api/transfer', 'POST', { to: me, coin_id: coinId });

@@ -1,10 +1,3 @@
-// bigint.hpp
-//
-// Thin RAII / convenience wrapper around GMP's mpz_t so the rest of the
-// codebase can write ordinary-looking C++ (BigInt a = b * c % n;) instead of
-// raw mpz_* calls everywhere. Only the operations GhostCash actually needs
-// are wrapped -- this is not meant to be a general-purpose bignum library.
-
 #pragma once
 
 #include <gmp.h>
@@ -47,8 +40,6 @@ public:
 
     ~BigInt() { mpz_clear(v); }
 
-    // ---- arithmetic (all modular ops reduce into [0, n)) ----
-
     static BigInt add(const BigInt& a, const BigInt& b) {
         BigInt r; mpz_add(r.v, a.v, b.v); return r;
     }
@@ -70,7 +61,6 @@ public:
         return r;
     }
 
-    // Modular inverse of a mod n. Throws if a is not invertible mod n.
     static BigInt invmod(const BigInt& a, const BigInt& n) {
         BigInt r;
         if (mpz_invert(r.v, a.v, n.v) == 0) {
@@ -87,12 +77,11 @@ public:
         BigInt r; mpz_gcd(r.v, a.v, b.v); return r;
     }
 
-    // Random integer uniformly in [1, n-1], using a supplied GMP RNG state.
     static BigInt random_below(const BigInt& n, gmp_randstate_t& rng) {
         BigInt r;
         do {
             mpz_urandomm(r.v, rng, n.v);
-        } while (mpz_sgn(r.v) == 0); // reject 0
+        } while (mpz_sgn(r.v) == 0);
         return r;
     }
 
@@ -108,10 +97,9 @@ public:
         return result;
     }
 
-    // Import raw big-endian bytes (e.g. a SHA-256 digest) as a positive integer.
     static BigInt from_bytes(const unsigned char* data, size_t len) {
         BigInt r;
-        mpz_import(r.v, len, 1 /*MSB first*/, 1 /*word size*/, 0 /*native endian within word*/, 0, data);
+        mpz_import(r.v, len, 1, 1, 0, 0, data);
         return r;
     }
 

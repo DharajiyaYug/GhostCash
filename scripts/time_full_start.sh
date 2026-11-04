@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Times the bank server's first start with the full-size parameters
-# (256-bit q, 3072-bit p, 2048-bit RSA x3). Uses a throwaway state file.
 set -u
 cd "$(dirname "$0")/.."
 STATE=$(mktemp -u /tmp/ghostcash-full-XXXXXX.json)

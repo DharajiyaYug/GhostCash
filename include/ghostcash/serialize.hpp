@@ -1,12 +1,3 @@
-// serialize.hpp
-//
-// JSON wire/storage format for everything that crosses a process boundary:
-// coins, transcripts, the public group and bank keys, and the bank's whole
-// persistent state. Big integers are lower-case hex strings.
-//
-// All from_* functions throw (std::exception) on missing or malformed fields;
-// servers catch that and answer 400.
-
 #pragma once
 
 #include "ghostcash/bank.hpp"
@@ -21,7 +12,6 @@
 #include <string>
 
 namespace wire {
-
 using json = nlohmann::json;
 
 inline json hex(const BigInt& x) { return x.to_string(16); }
@@ -65,8 +55,6 @@ inline GroupParams group_from_json(const json& j) {
     return GroupParams{from_hex(j.at("p")), from_hex(j.at("q")), from_hex(j.at("g"))};
 }
 
-// The bank's public parameters as served to clients: the group and one
-// (denomination, n, e) entry per denomination.
 inline json params_to_json(const GroupParams& group, const Bank& bank) {
     json denoms = json::array();
     for (int d : bank.denominations()) {
@@ -82,11 +70,8 @@ inline void ring_from_json(PublicKeyRing& ring, const json& denoms) {
         ring.add(d.at("denomination").get<int>(), from_hex(d.at("n")), from_hex(d.at("e")));
     }
 }
+}
 
-} // namespace wire
-
-// Whole-bank snapshot, used by the bank server to survive restarts. Holds the
-// private RSA exponents, so the file must be kept private.
 struct BankPersistence {
     static wire::json save(const Bank& b) {
         using namespace wire;

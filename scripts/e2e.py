@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""End-to-end test of GhostCash.
-
-Starts a bank server, an app server and three wallet agents (alice, bob,
-carol) on temporary ports with small crypto parameters, then drives the real
-HTTP APIs through the whole scenario:
-
-  signup -> generate coins -> transfer -> redeem -> double spend (traced to the
-  withdrawer) -> forged redeem -> offline/unknown receiver -> insufficient
-  balance -> bank restart (state survives)
-
-Run `make servers` first (or `make e2e`). Exits non-zero if any check fails.
-Set E2E_FULL=1 to run with the specified sizes (256-bit q, 3072-bit p, 2048-bit
-RSA) instead of the small test sizes.
-"""
-
 import json
 import os
 import shutil
@@ -25,18 +10,16 @@ import urllib.error
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BUILD = os.environ.get("E2E_BUILD", os.path.join(ROOT, "build"))  # E2E_BUILD: run against another set of binaries
+BUILD = os.environ.get("E2E_BUILD", os.path.join(ROOT, "build"))
 UI = os.path.join(ROOT, "ui")
 
 BANK_PORT, APP_PORT = 19000, 18000
 WALLET_PORTS = {"alice": 18081, "bob": 18082, "carol": 18083, "erin": 18084}
-# wallet key -> registered username, where they differ (capital letters are allowed)
 USERNAMES = {"erin": "Erin"}
 INTERNAL_KEY = "e2e-internal-key"
 
 procs = []
 failures = []
-
 
 def http(port, path, method="GET", body=None, headers=None):
     data = json.dumps(body).encode() if body is not None else None
@@ -54,23 +37,19 @@ def http(port, path, method="GET", body=None, headers=None):
         except ValueError:
             return e.code, {"error": raw.decode(errors="replace")}
 
-
 def wallet(user, path, method="GET", body=None):
     return http(WALLET_PORTS[user], path, method, body)
-
 
 def check(name, condition, detail=""):
     print(("  PASS  " if condition else "  FAIL  ") + name + ("" if condition else "   <- " + str(detail)))
     if not condition:
         failures.append(name)
 
-
 def start(name, argv, logdir):
     log = open(os.path.join(logdir, name + ".log"), "w")
     p = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT)
     procs.append((name, p))
     return p
-
 
 def wait_up(port, path="/health", timeout=60):
     end = time.time() + timeout
@@ -82,7 +61,6 @@ def wait_up(port, path="/health", timeout=60):
             time.sleep(0.2)
     raise RuntimeError("port %d did not come up" % port)
 
-
 def start_bank(tmp, logdir):
     argv = [os.path.join(BUILD, "bank_server"), "--port", str(BANK_PORT),
             "--state", os.path.join(tmp, "bank_state.json"), "--key", INTERNAL_KEY]
@@ -92,11 +70,9 @@ def start_bank(tmp, logdir):
     wait_up(BANK_PORT)
     return p
 
-
 def balance(user):
     s, r = wallet(user, "/api/state")
     return r.get("bank_balance")
-
 
 def main():
     for b in ("bank_server", "app_server", "wallet_agent"):
@@ -278,7 +254,6 @@ def main():
 
     print("\n%s: %d check(s) failed" % ("FAILED" if failures else "OK", len(failures)))
     sys.exit(1 if failures else 0)
-
 
 if __name__ == "__main__":
     main()

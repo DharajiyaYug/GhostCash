@@ -1,32 +1,3 @@
-// wallet_agent.cpp
-//
-// The GhostCash wallet: a local program run by each user. It holds the coins
-// and their secrets (a, s) in a local SQLite database and performs *all*
-// cryptography on the user's machine -- blinding, tags, challenge responses,
-// signature and proof checks. The app server and the bank only ever see
-// blinded values (withdrawal), coins and challenges in transit (transfer), or
-// finished transcripts (redeem).
-//
-// It also serves the local web UI on http://127.0.0.1:<port>/ and a small JSON
-// API the UI calls:
-//
-//   POST /api/signup   {username, password}
-//   POST /api/login    {username, password}
-//   POST /api/logout
-//   GET  /api/state                      balance, coins, received payments, history
-//   POST /api/generate {denomination}    withdraw a coin from the bank
-//   POST /api/transfer {to, coin_id, force?}   pay a coin to another user
-//   POST /api/redeem   {id?}             redeem one (or all) received payments
-//
-// A transfer is the interactive protocol, relayed through the app server:
-//   payer -> receiver: coin            receiver checks it, answers with a
-//   receiver -> payer: challenge       challenge bound to itself; the payer
-//   payer -> receiver: response y      answers; the receiver verifies and
-//   receiver -> payer: accepted        keeps the transcript to redeem later.
-//
-// Usage: wallet_agent [--port 8081] [--app-host 127.0.0.1] [--app-port 8000]
-//                     [--data ./wallet-data] [--ui ./ui]
-
 #include "ghostcash/bigint.hpp"
 #include "ghostcash/coin.hpp"
 #include "ghostcash/hash_utils.hpp"
@@ -54,9 +25,6 @@ using net::json;
 using net::reply;
 
 namespace {
-
-// ---- local SQLite store ---------------------------------------------------
-
 class Db {
 public:
     using Row = std::vector<std::string>;
@@ -84,8 +52,6 @@ public:
     Db(const Db&) = delete;
     Db& operator=(const Db&) = delete;
 
-    // Runs one statement with text-bound parameters; returns all rows as
-    // strings (NULL becomes "").
     std::vector<Row> query(const std::string& sql, const std::vector<std::string>& params = {}) {
         sqlite3_stmt* st = nullptr;
         if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &st, nullptr) != SQLITE_OK) {
@@ -115,16 +81,14 @@ private:
     sqlite3* db_ = nullptr;
 };
 
-// ---- agent state ----------------------------------------------------------
-
-struct Incoming {          // a payment where we are the receiver
+struct Incoming {
     PaymentSession session;
     std::string from;
 };
 
 enum class OutState { WaitingChallenge, WaitingResult, Done };
 
-struct Outgoing {          // a payment where we are the payer
+struct Outgoing {
     std::string to;
     long long coin_id = 0;
     WalletCoin wc;
@@ -142,9 +106,8 @@ struct Agent {
     int app_port = 8000;
     std::string data_dir = "./wallet-data";
 
-    // Valid while logged in (username non-empty).
     std::string username, token;
-    unsigned long generation = 0; // bumped on every login/logout; stops stale inbox threads
+    unsigned long generation = 0;
     GroupParams group;
     PublicKeyRing ring;
     std::unique_ptr<Wallet> wallet;
@@ -158,11 +121,6 @@ Agent ag;
 
 std::string short_serial(const std::string& serial) { return serial.substr(0, 8); }
 
-// ---- calls to the app server (caller holds ag.mu where state is touched) --
-
-// The app server no longer recognises our token (for example because it was
-// restarted): drop the login, so the UI goes back to the sign-in form instead
-// of showing errors. Caller holds ag.mu.
 void expire_session() {
     ++ag.generation;
     ag.username.clear();
@@ -191,7 +149,6 @@ void add_history(const std::string& kind, const std::string& detail) {
     if (ag.db) ag.db->query("INSERT INTO history(ts, kind, detail) VALUES(?,?,?)", {net::now_iso(), kind, detail});
 }
 
-// Sends one relayed transfer message. Returns "" on success, else the error.
 std::string send_message(const std::string& to, const std::string& type, const std::string& transfer_id,
                          const json& payload) {
     int status = 0;
@@ -208,12 +165,9 @@ void finish_outgoing(Outgoing& o, bool ok, const std::string& message) {
     ag.cv.notify_all();
 }
 
-// ---- incoming transfer messages (called with ag.mu held) ------------------
-
 void on_coin(const std::string& from, const std::string& tid, const json& payload) {
     Coin coin = wire::coin_from_json(payload.at("coin"));
 
-    // A careful receiver never accepts the same coin twice.
     if (!ag.db->query("SELECT 1 FROM transcripts WHERE serial=?", {coin.serial}).empty()) {
         send_message(from, "reject", tid, {{"reason", "coin already received"}});
         add_history("rejected", "refused coin " + short_serial(coin.serial) + " from " + from + ": already received");
@@ -237,9 +191,8 @@ void on_challenge(const std::string& from, const std::string& tid, const json& p
     Outgoing& o = it->second;
 
     o.steps.push_back(from + " verified the coin and sent a challenge");
-    WalletCoin wc = o.wc; // a copy, so a forced re-spend of a spent coin still answers
+    WalletCoin wc = o.wc;
     BigInt y;
-    // pay() re-derives the challenge for the receiver we mean to pay.
     if (!ag.wallet->pay(wc, o.to, payload.at("time").get<std::string>(), payload.at("nonce").get<std::string>(), y)) {
         finish_outgoing(o, false, "wallet refused to answer: coin already spent");
         return;
@@ -306,7 +259,6 @@ void handle_message(const json& m) {
     else if (type == "reject") on_result(from, tid, payload, false);
 }
 
-// Long-polls the app server's mailbox for as long as this login is current.
 void inbox_loop(unsigned long generation, std::string token) {
     for (;;) {
         {
@@ -321,7 +273,7 @@ void inbox_loop(unsigned long generation, std::string token) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
         }
-        if (r->status == 401) return; // session no longer valid
+        if (r->status == 401) return;
         if (r->status != 200) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
@@ -344,12 +296,9 @@ void inbox_loop(unsigned long generation, std::string token) {
     }
 }
 
-// ---- login ------------------------------------------------------------------
-
-// Caller holds ag.mu.
 void start_session(const std::string& username, const std::string& token) {
     int status = 0;
-    json params = app_call("GET", "/params", json(), status, /*with_token=*/false);
+    json params = app_call("GET", "/params", json(), status, false);
     if (status != 200) throw std::runtime_error("could not fetch bank parameters");
 
     ag.group = wire::group_from_json(params.at("group"));
@@ -375,8 +324,7 @@ json coin_row_json(const Db::Row& r) {
     return {{"id", std::stoll(r[0])}, {"denomination", std::stoi(r[1])}, {"serial", r[2]},
             {"spent", r[3] == "1"}, {"created", r[4]}};
 }
-
-} // namespace
+}
 
 int main(int argc, char** argv) {
     net::Args args(argc, argv);
@@ -388,8 +336,6 @@ int main(int argc, char** argv) {
 
     httplib::Server svr;
 
-    // Wraps an API handler: parse errors and bad input become 400, an
-    // unreachable app server 502. `needs_login` handlers get the lock held.
     auto api = [&](bool needs_login, std::function<void(const httplib::Request&, httplib::Response&,
                                                        std::unique_lock<std::mutex>&)> fn) {
         return [&, needs_login, fn](const httplib::Request& req, httplib::Response& res) {
@@ -414,7 +360,7 @@ int main(int argc, char** argv) {
             int status = 0;
             json r = app_call("POST", signup ? "/signup" : "/login",
                               {{"username", body.at("username")}, {"password", body.at("password")}},
-                              status, /*with_token=*/false);
+                              status, false);
             if (status != 200) {
                 fail(res, status, r.value("error", "authentication failed"));
                 return;
@@ -448,7 +394,7 @@ int main(int argc, char** argv) {
             if (status == 200) balance = r.at("balance");
         } catch (const std::exception&) {
         }
-        if (ag.username.empty()) { // the app server dropped our session
+        if (ag.username.empty()) {
             reply(res, 200, json{{"logged_in", false}});
             return;
         }
@@ -514,9 +460,6 @@ int main(int argc, char** argv) {
         std::string coin_id = std::to_string(body.at("coin_id").get<long long>());
         bool force = body.value("force", false);
 
-        // Usernames are case-insensitive: resolve to the receiver's registered
-        // spelling, which is also the id the challenge is bound to. Paying
-        // yourself is allowed (it moves a coin back into your bank balance).
         if (!std::regex_match(to, std::regex("[A-Za-z0-9_]{1,20}"))) {
             fail(res, 400, "invalid username");
             return;
@@ -558,7 +501,7 @@ int main(int argc, char** argv) {
         o.wc.coin = wire::coin_from_json(json::parse(rows[0][1]));
         o.wc.a = BigInt(rows[0][2], 16);
         o.wc.s = BigInt(rows[0][3], 16);
-        o.wc.spent = false; // a forced re-spend deliberately ignores the wallet's own bookkeeping
+        o.wc.spent = false;
         o.steps.push_back(std::string(already_spent ? "MALICIOUS: re-spending an already spent coin; " : "") +
                           "sent the coin to " + to);
         ag.outgoing[tid] = o;
@@ -601,7 +544,7 @@ int main(int argc, char** argv) {
             if (outcome == "accepted" || outcome == "duplicate") new_status = "redeemed";
             else if (outcome == "double_spend") new_status = "rejected";
             else if (outcome == "invalid") new_status = "rejected";
-            else new_status = "pending"; // transport/other error: keep it to retry
+            else new_status = "pending";
 
             if (outcome == "double_spend") detail = "double spend detected: the bank rejected this payment";
             if (new_status != "pending") {

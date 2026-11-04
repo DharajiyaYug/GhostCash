@@ -1,26 +1,3 @@
-// bank_server.cpp
-//
-// The bank as a standalone HTTP server. It owns the RSA keys, the account
-// ledger, the withdrawal tag log and the spent-coin database, and does the
-// blind signing and the double-spend tracing. State is snapshotted to a JSON
-// file after every change, so a restart picks up where it left off.
-//
-// It is meant to be reached only by the app server: every endpoint except
-// /health and /params requires the shared X-Internal-Key header.
-//
-//   GET  /health
-//   GET  /params                       group + public key per denomination
-//   POST /accounts                     {name, balance}
-//   GET  /accounts/<name>/balance
-//   POST /withdraw                     {account, denomination, blinded_m, tag}
-//   POST /deposit                      {transcript}
-//   GET  /admin/state
-//
-// Usage: bank_server [--port 9000] [--state bank_state.json]
-//                    [--key dev-internal-key] [--fast]
-// --fast uses small group/RSA sizes (demos and tests); the default is the
-// specified size (256-bit q, 3072-bit p, 2048-bit RSA).
-
 #include "ghostcash/bank.hpp"
 #include "ghostcash/group_setup.hpp"
 #include "ghostcash/rng.hpp"
@@ -36,7 +13,6 @@ using net::json;
 using net::reply;
 
 namespace {
-
 const char* status_name(DepositStatus s) {
     switch (s) {
         case DepositStatus::Accepted:    return "accepted";
@@ -46,8 +22,7 @@ const char* status_name(DepositStatus s) {
     }
     return "invalid";
 }
-
-} // namespace
+}
 
 int main(int argc, char** argv) {
     net::Args args(argc, argv);
@@ -80,8 +55,6 @@ int main(int argc, char** argv) {
 
     httplib::Server svr;
 
-    // Wraps a handler: optional internal-key check, bank lock, and a catch-all
-    // that turns any exception (bad JSON, unknown account, ...) into a 400.
     auto handler = [&](bool internal, std::function<void(const httplib::Request&, httplib::Response&)> fn) {
         return [&, internal, fn](const httplib::Request& req, httplib::Response& res) {
             if (internal && req.get_header_value("X-Internal-Key") != internal_key) {

@@ -11,21 +11,6 @@ endif()
 
 add_compile_options(-Wall -Wextra)
 
-# ---------------------------------------------------------------------------
-# Dependencies: GMP and OpenSSL (libcrypto, for SHA-256).
-#
-# OpenSSL has an official CMake package (`find_package(OpenSSL)`) that
-# already knows how to locate Homebrew/MacPorts/vcpkg/system installs.
-#
-# GMP has no upstream CMake config, so we locate it manually via
-# find_path/find_library. On top of the usual system paths, we also hint
-# CMake at Homebrew's install locations on macOS (both the Apple Silicon
-# prefix /opt/homebrew and the Intel prefix /usr/local), since neither is
-# on the compiler's default search path and Homebrew keeps some formulae
-# (like OpenSSL) "keg-only". A user can always override with:
-#   cmake -B build -DGMP_ROOT=/path/to/gmp
-# ---------------------------------------------------------------------------
-
 find_package(PkgConfig QUIET)
 if(PKG_CONFIG_FOUND)
   pkg_check_modules(PC_GMP QUIET gmp)
@@ -61,9 +46,6 @@ if(NOT TARGET GMP::GMP)
     INTERFACE_INCLUDE_DIRECTORIES "${GMP_INCLUDE_DIR}")
 endif()
 
-# Give Homebrew's keg-only OpenSSL a fighting chance of being found even
-# without the user setting up their environment (Homebrew normally tells
-# you to export these, but doesn't set them for you).
 if(NOT OPENSSL_ROOT_DIR)
   if(EXISTS /opt/homebrew/opt/openssl@3)
     set(OPENSSL_ROOT_DIR /opt/homebrew/opt/openssl@3)
@@ -73,8 +55,6 @@ if(NOT OPENSSL_ROOT_DIR)
 endif()
 
 find_package(OpenSSL REQUIRED)
-
-# ---------------------------------------------------------------------------
 
 file(GLOB GHOSTCASH_HEADERS CONFIGURE_DEPENDS include/ghostcash/*.hpp)
 
@@ -103,12 +83,6 @@ target_link_libraries(run_tests PRIVATE GMP::GMP OpenSSL::Crypto)
 enable_testing()
 add_test(NAME ghostcash_unit_tests COMMAND run_tests)
 
-# ---------------------------------------------------------------------------
-# Networked programs: bank server, app server, wallet agent.
-# Header-only HTTP (cpp-httplib) and JSON (nlohmann) live under third_party/.
-# The wallet agent also links SQLite for its local coin store.
-# ---------------------------------------------------------------------------
-
 find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
 
@@ -123,7 +97,5 @@ foreach(prog bank_server app_server wallet_agent)
 endforeach()
 target_link_libraries(wallet_agent PRIVATE SQLite::SQLite3)
 
-# Place binaries in build/ (matching the Makefile's layout) instead of
-# scattering them across CMake's default per-target directories.
 set_target_properties(demo_issuance demo_interactive run_tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})

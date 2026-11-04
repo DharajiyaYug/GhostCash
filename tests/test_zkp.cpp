@@ -1,13 +1,3 @@
-// test_zkp.cpp
-//
-// Unit tests for the Schnorr-style proof (zkp.hpp) and the challenge hash:
-// completeness (an honest response verifies), the verifier's input checks
-// (bad y, wrong challenge, x = 0, A or S outside the subgroup), extraction
-// of (a, s) from two transcripts, and a simulator showing a single transcript
-// carries no information about a or s (honest-verifier zero knowledge).
-//
-// Uses a small group for test speed; nothing under test depends on the size.
-
 #include "third_party/catch.hpp"
 #include "ghostcash/rng.hpp"
 #include "ghostcash/group_setup.hpp"
@@ -15,12 +5,11 @@
 #include "ghostcash/zkp.hpp"
 
 namespace {
-
 struct ZkpFixture {
     GroupParams grp;
     BigInt a, s, A, S;
 
-    ZkpFixture() : grp(GroupSetup::generate(/*q_bits=*/64, /*p_bits=*/256, Rng::instance())) {
+    ZkpFixture() : grp(GroupSetup::generate(64, 256, Rng::instance())) {
         a = BigInt::random_below(grp.q, Rng::instance());
         s = BigInt::random_below(grp.q, Rng::instance());
         A = BigInt::powmod(grp.g, a, grp.p);
@@ -29,8 +18,7 @@ struct ZkpFixture {
 
     BigInt challenge() { return BigInt::random_below(grp.q, Rng::instance()); }
 };
-
-} // namespace
+}
 
 TEST_CASE("Schnorr: an honest response verifies", "[zkp]") {
     ZkpFixture f;
@@ -67,11 +55,10 @@ TEST_CASE("Schnorr: a prover who doesn't know a, s cannot answer", "[zkp][attack
 
 TEST_CASE("Schnorr: challenge x = 0 and x >= q are rejected", "[zkp][attack]") {
     ZkpFixture f;
-    // x = 0 would make y = s, leaking s in a single spend.
     BigInt y0 = Schnorr::respond(f.a, f.s, BigInt(0), f.grp.q);
     REQUIRE_FALSE(Schnorr::verify(f.grp, f.A, f.S, BigInt(0), y0));
 
-    BigInt xq = f.grp.q; // equals 0 mod q, but out of range as given
+    BigInt xq = f.grp.q;
     BigInt yq = Schnorr::respond(f.a, f.s, xq, f.grp.q);
     REQUIRE_FALSE(Schnorr::verify(f.grp, f.A, f.S, xq, yq));
 }
@@ -80,8 +67,6 @@ TEST_CASE("Schnorr: y outside [0, q) is rejected", "[zkp][attack]") {
     ZkpFixture f;
     BigInt x = f.challenge();
     BigInt y = Schnorr::respond(f.a, f.s, x, f.grp.q);
-    // y + q is congruent to y mod q and would satisfy the equation, but is
-    // not a canonical response.
     REQUIRE_FALSE(Schnorr::verify(f.grp, f.A, f.S, x, BigInt::add(y, f.grp.q)));
 }
 
@@ -90,7 +75,7 @@ TEST_CASE("Schnorr: A or S outside the order-q subgroup is rejected", "[zkp][att
     BigInt x = f.challenge();
     BigInt y = Schnorr::respond(f.a, f.s, x, f.grp.q);
 
-    BigInt p_minus_1 = BigInt::sub(f.grp.p, BigInt(1)); // order 2, not in the subgroup
+    BigInt p_minus_1 = BigInt::sub(f.grp.p, BigInt(1));
     REQUIRE_FALSE(Schnorr::is_group_element(f.grp, BigInt(0)));
     REQUIRE_FALSE(Schnorr::is_group_element(f.grp, BigInt(1)));
     REQUIRE_FALSE(Schnorr::is_group_element(f.grp, p_minus_1));
@@ -126,10 +111,6 @@ TEST_CASE("Schnorr: two transcripts with the same challenge reveal nothing", "[z
 }
 
 TEST_CASE("Schnorr: a transcript can be simulated without a or s (honest-verifier zero knowledge)", "[zkp]") {
-    // Pick x and y first, then solve for the commitment: S = g^y * A^-x.
-    // The resulting (S, x, y) passes verification although the simulator
-    // never knew s (or a) -- so a transcript, on its own, proves nothing a
-    // verifier couldn't have produced by itself.
     ZkpFixture f;
     BigInt x = f.challenge();
     BigInt y = BigInt::random_below(f.grp.q, Rng::instance());
@@ -155,8 +136,6 @@ TEST_CASE("HashUtils: challenge is deterministic, in [1, q-1], and bound to ever
 
 TEST_CASE("HashUtils: challenge fields cannot be re-split", "[zkp][hash_utils]") {
     ZkpFixture f;
-    // Same concatenation "ab" + "c" vs "a" + "bc": length-prefixing must
-    // keep them apart.
     REQUIRE(HashUtils::hash_challenge("ab", "c", "n", f.grp.q) !=
             HashUtils::hash_challenge("a", "bc", "n", f.grp.q));
 }

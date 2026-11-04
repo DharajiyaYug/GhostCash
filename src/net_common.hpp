@@ -1,10 +1,3 @@
-// net_common.hpp
-//
-// Small helpers shared by the three programs that speak HTTP (bank server,
-// app server, wallet agent): JSON replies, command-line parsing, atomic file
-// writes, random hex from the OS, timestamps. Not part of the ghostcash
-// library.
-
 #pragma once
 
 #include "httplib.h"
@@ -22,7 +15,6 @@
 #include <string>
 
 namespace net {
-
 using json = nlohmann::json;
 
 inline void reply(httplib::Response& res, int status, const json& body) {
@@ -34,7 +26,6 @@ inline void fail(httplib::Response& res, int status, const std::string& message)
     reply(res, status, json{{"error", message}});
 }
 
-// --name value, or a bare --flag.
 class Args {
 public:
     Args(int argc, char** argv) {
@@ -76,8 +67,6 @@ inline bool read_file(const std::string& path, std::string& out) {
     return true;
 }
 
-// Writes to a temporary file and renames it over the target, so a crash
-// mid-write never leaves a truncated state file.
 inline void write_file_atomic(const std::string& path, const std::string& content) {
     std::string tmp = path + ".tmp";
     {
@@ -110,5 +99,4 @@ inline std::string now_iso() {
     std::strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tm);
     return buf;
 }
-
-} // namespace net
+}
