@@ -150,10 +150,11 @@ public:
         BigInt x = t.challenge(group_.q);
         if (!Schnorr::verify(group_, c.A, c.S, x, t.y)) return rejected("bad proof");
 
-        auto it = spent_.find(c.serial);
+        const std::string key = coin_key(c);
+        auto it = spent_.find(key);
         if (it == spent_.end()) {
             if (!balances_.count(t.receiver_id)) return rejected("unknown receiver account");
-            spent_.emplace(c.serial, t);
+            spent_.emplace(key, t);
             balances_[t.receiver_id] += c.denomination;
             DepositResult ok;
             ok.status = DepositStatus::Accepted;
@@ -161,10 +162,6 @@ public:
         }
 
         const Transcript& prev = it->second;
-        if (prev.coin.A != c.A || prev.coin.S != c.S) {
-            return rejected("serial already used by a different coin");
-        }
-
         BigInt prev_x = prev.challenge(group_.q);
         if (prev_x == x) {
             DepositResult dup;
@@ -206,6 +203,10 @@ public:
     bool is_flagged(const std::string& user) const { return flagged_.count(user) != 0; }
     const std::set<std::string>& flagged_accounts() const { return flagged_; }
     size_t spent_count() const { return spent_.size(); }
+
+    static std::string coin_key(const Coin& c) {
+        return std::to_string(c.denomination) + "|" + c.serial + "|" + c.A.to_string(16) + "|" + c.S.to_string(16);
+    }
 
     void set_balance(const std::string& user, int amount) {
         balances_[user] = amount;

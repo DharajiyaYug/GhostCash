@@ -36,6 +36,16 @@ WalletCoin withdraw(Fixture& f, const std::string& user, int denom) {
     return f.wallet.finish_withdrawal(f.bank, batch.candidates[keep], blind_sig);
 }
 
+WalletCoin coin_with_serial(Fixture& f, const std::string& serial, int denom) {
+    BigInt a = BigInt::random_below(f.group.q, Rng::instance());
+    BigInt s = BigInt::random_below(f.group.q, Rng::instance());
+    BigInt A = BigInt::powmod(f.group.g, a, f.group.p);
+    BigInt S = BigInt::powmod(f.group.g, s, f.group.p);
+    BigInt m = HashUtils::coin_message(serial, A, S, f.bank.public_modulus(denom));
+    Coin c{serial, A, S, f.bank.blind_sign(denom, m), denom};
+    return WalletCoin{c, a, s, false};
+}
+
 bool pay(Fixture& f, Merchant& m, WalletCoin& wc, const std::string& time, Transcript& out) {
     PaymentSession session;
     if (!m.begin_payment(wc.coin, time, session)) return false;
@@ -221,6 +231,48 @@ TEST_CASE("Clearance: redeeming to an unknown account is rejected", "[clearance]
     REQUIRE(pay(f, ghost, wc, "t1", t));
     REQUIRE(f.bank.deposit(t).status == DepositStatus::Invalid);
     REQUIRE(f.bank.spent_count() == 0);
+}
+
+TEST_CASE("Clearance: two different coins that share a serial are both paid", "[clearance]") {
+    Fixture f;
+    WalletCoin first = coin_with_serial(f, "shared-serial", 5);
+    WalletCoin second = coin_with_serial(f, "shared-serial", 5);
+    REQUIRE(first.coin.A != second.coin.A);
+
+    Transcript t1, t2;
+    REQUIRE(pay(f, f.bob, first, "t1", t1));
+    REQUIRE(pay(f, f.carol, second, "t2", t2));
+
+    REQUIRE(f.bank.deposit(t1).status == DepositStatus::Accepted);
+    REQUIRE(f.bank.deposit(t2).status == DepositStatus::Accepted);
+    REQUIRE(f.bank.balance("bob") == 5);
+    REQUIRE(f.bank.balance("carol") == 5);
+    REQUIRE(f.bank.spent_count() == 2);
+    REQUIRE(f.bank.flagged_accounts().empty());
+
+    REQUIRE(f.bank.deposit(t2).status == DepositStatus::Duplicate);
+    REQUIRE(f.bank.balance("carol") == 5);
+}
+
+TEST_CASE("Clearance: a shared serial does not hide a double spend", "[clearance][attack]") {
+    Fixture f;
+    WalletCoin other = coin_with_serial(f, "shared-serial", 5);
+    WalletCoin cheat = coin_with_serial(f, "shared-serial", 5);
+    WalletCoin cheat_copy = cheat;
+
+    Transcript t0, t1, t2;
+    REQUIRE(pay(f, f.bob, other, "t0", t0));
+    REQUIRE(pay(f, f.bob, cheat, "t1", t1));
+    REQUIRE(pay(f, f.carol, cheat_copy, "t2", t2));
+
+    REQUIRE(f.bank.deposit(t0).status == DepositStatus::Accepted);
+    REQUIRE(f.bank.deposit(t1).status == DepositStatus::Accepted);
+    DepositResult r = f.bank.deposit(t2);
+    REQUIRE(r.status == DepositStatus::DoubleSpend);
+    REQUIRE(r.a == cheat.a);
+    REQUIRE(r.s == cheat.s);
+    REQUIRE(f.bank.balance("bob") == 10);
+    REQUIRE(f.bank.balance("carol") == 0);
 }
 
 TEST_CASE("Withdrawal: insufficient balance is rejected and leaves no trace", "[clearance][account]") {

@@ -147,7 +147,8 @@ struct BankPersistence {
 
         b.spent_.clear();
         for (auto it = j.at("spent").begin(); it != j.at("spent").end(); ++it) {
-            b.spent_.emplace(it.key(), transcript_from_json(it.value()));
+            Transcript t = transcript_from_json(it.value());
+            b.spent_.emplace(Bank::coin_key(t.coin), std::move(t));
         }
 
         b.flagged_ = j.at("flagged").get<std::set<std::string>>();

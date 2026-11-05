@@ -2,7 +2,7 @@
 
 Purpose of this file: hand this to a fresh Claude (or a new teammate) so they can continue the project without having seen any earlier conversation. It describes what exists, how every part works, exactly what is sent on the wire, how to build/run/test it, which decisions are made, and which are still open.
 
-Last updated against `main` (commit hashes changed once when the history was rewritten to remove co-author lines; the file contents are the same as before). Everything described as "built" is in that commit and was verified: 80 unit test cases pass (about 410 assertions; the count varies slightly because one cut-and-choose test loops until it has seen both outcomes), and `scripts/e2e.py` passes (about 50 checks), also at full size. Comments were removed from all source files on 2026-11-04; this file and README.md are the documentation.
+Last updated against `main` (commit hashes changed once when the history was rewritten to remove co-author lines; the file contents are the same as before). Everything described as "built" is in that commit and was verified: 82 unit test cases pass (about 420-470 assertions; the count varies slightly because one cut-and-choose test loops until it has seen both outcomes), and `scripts/e2e.py` passes (about 50 checks), also at full size. Comments were removed from all source files on 2026-11-04; this file and README.md are the documentation.
 
 ---
 
@@ -156,11 +156,10 @@ Input: a `Transcript`. Steps:
 3. Recompute `x = challenge(receiver_id, time, nonce)`; `Schnorr::verify` must pass -> else `Invalid("bad proof")`.
 4. Look up `serial` in the spent-coin map:
    - **Not found:** receiver account must exist (else `Invalid("unknown receiver account")`, nothing stored); store the transcript; credit `receiver_id` with the denomination; `Accepted`.
-   - **Found, different `A`/`S`:** `Invalid("serial already used by a different coin")`.
    - **Found, same challenge** (`x` equal): `Duplicate` (a resubmission; nobody accused, nobody credited twice).
    - **Found, different challenge:** `DoubleSpend`. Extract `(a, s)` from the two transcripts, check `g^a == A` and `g^s == S`, look up `hex(H_tag(a, s))` in the tag log. If found: record `flagged_account` and add it to the flagged set. If not found: `DoubleSpend` with empty `flagged_account` and a detail note (untraceable, e.g. the wallet lied about its tag). The second depositor is **not** credited.
 
-Spent-coin database is keyed by **serial**.
+Spent-coin database is keyed by the **whole coin**: `Bank::coin_key(coin)` = `denomination|serial|hex(A)|hex(S)`, i.e. exactly what the bank signed plus which key signed it. Two different coins that happen to share a serial are judged separately and are both paid (the bank never sees serials at withdrawal, so it cannot keep them unique). Loading a saved state rebuilds the keys from the stored transcripts, so older state files keyed by serial still load correctly. (Fixed 2026-11-05; before, a second coin with a used serial was wrongly rejected as invalid.)
 
 ### 4.6 Known cryptographic limitations
 
@@ -190,7 +189,7 @@ Spent-coin database is keyed by **serial**.
 | `transcript.hpp` | `struct Transcript {coin, receiver_id, time, nonce, y}` with `challenge(q)` (recomputes x). |
 | `public_keys.hpp` | `PublicKeySource` interface (`has_denomination`, `public_modulus`, `public_exponent`; non-virtual `verify_check`, `verify`). `PublicKeyRing` = client-side registry (`add`, `denominations`). `Bank` implements the interface too. Wallet and Merchant take a `PublicKeySource&`, so they work from published public keys without a `Bank`. |
 | `zkp.hpp` | `Schnorr`: `is_group_element`, `is_valid_challenge`, `respond(a,s,x,q)`, `verify(grp,A,S,x,y)`, `extract(grp,x1,y1,x2,y2,a_out,s_out)`. |
-| `bank.hpp` | `enum DepositStatus {Accepted, Duplicate, DoubleSpend, Invalid}`; `DepositResult {status, detail, flagged_account, a, s}`; `class Bank : PublicKeySource`: `set_group`, `add_denomination`, `denominations`, `blind_sign`, `withdraw_candidates`/`set_withdraw_candidates`, `begin_withdrawal(user, denom, candidates)` -> keep index, `finish_withdrawal(user, openings)` -> blind signature, `has_open_withdrawal`, `open_withdrawal_index`, `deposit(transcript)`, `is_flagged`, `flagged_accounts`, `spent_count`, `has_account`, `has_group`, `group()`, ledger: `set_balance`, `balance`, `debit`. Private: `keys_` (denom -> RSAKeyPair), `balances_`, `group_`, `tag_log_` (hex tag -> account), `spent_` (serial -> Transcript), `flagged_`. `friend struct BankPersistence` (defined in `serialize.hpp`). |
+| `bank.hpp` | `enum DepositStatus {Accepted, Duplicate, DoubleSpend, Invalid}`; `DepositResult {status, detail, flagged_account, a, s}`; `class Bank : PublicKeySource`: `set_group`, `add_denomination`, `denominations`, `blind_sign`, `withdraw_candidates`/`set_withdraw_candidates`, `begin_withdrawal(user, denom, candidates)` -> keep index, `finish_withdrawal(user, openings)` -> blind signature, `has_open_withdrawal`, `open_withdrawal_index`, `deposit(transcript)`, `is_flagged`, `flagged_accounts`, `spent_count`, `has_account`, `has_group`, `group()`, ledger: `set_balance`, `balance`, `debit`. Private: `keys_` (denom -> RSAKeyPair), `balances_`, `group_`, `tag_log_` (hex tag -> account), `spent_` (coin_key -> first redeemed Transcript), `flagged_`. `friend struct BankPersistence` (defined in `serialize.hpp`). |
 | `wallet.hpp` | `PendingWithdrawal`, `WalletCoin {coin, a, s, spent}`, `class Wallet`: `prepare_withdrawal(denom, keys, pending)`, `unblind(keys, pending, blind_sig)`, `finish_withdrawal(...)` (returns `WalletCoin`), `pay(wc, receiver_id, time, nonce, y_out)`. |
 | `merchant.hpp` | `PaymentSession {coin, time, nonce, x}`; `class Merchant(receiver_id, group, keys, rng)`: `begin_payment(coin, time, session)`, `finish_payment(session, y, transcript)`. |
 | `serialize.hpp` | JSON helpers in `namespace wire`: `hex`/`from_hex`, `coin_to/from_json`, `transcript_to/from_json`, `group_to/from_json`, `params_to_json`, `ring_from_json`. `struct BankPersistence {save(Bank) -> json; load(Bank&, json)}` (whole-bank JSON snapshot; to be replaced by SQLite). |
@@ -333,7 +332,7 @@ Alice pays coin X to Bob (tid1) and, with "allow re-spending" ticked, to Carol (
   "keys": [{"denomination":1,"n":hex,"e":hex,"d":hex,"bits":2048}, ...],
   "balances": {"alice": 94, ...},
   "tag_log": {"<hex tag>": "alice", ...},
-  "spent": {"<serial>": <transcript json>, ...},
+  "spent": {"<denom|serial|A|S>": <transcript json>, ...},
   "flagged": ["alice"] }
 ```
 Rewritten atomically (tmp + rename) after every change. Contains the **private** RSA exponents.
@@ -362,7 +361,7 @@ Environment (the user's machine): Windows 11; project at `C:\IITK\CS670\project`
 
 ```sh
 make                  # demos, unit tests, bank_server, app_server, wallet_agent  (binaries in build/)
-make run-tests        # unit tests  ->  "All tests passed (~410 assertions in 80 test cases)"
+make run-tests        # unit tests  ->  "All tests passed (~420-470 assertions in 82 test cases)"
 make e2e              # builds servers, runs scripts/e2e.py (small sizes); E2E_FULL=1 for full sizes
 scripts/run_demo.sh   # bank :9000, app :8000, wallet A :8081, wallet B :8082; --fast for small sizes
 ./build/wallet_agent --port 8083 --data demo-data/wallet-c    # a third wallet
@@ -377,11 +376,11 @@ Ports used by tests: e2e uses bank 19000, app 18000, wallets 18081-18084.
 
 ## 9. Tests
 
-Unit tests (Catch2) in `tests/`, 80 test cases:
+Unit tests (Catch2) in `tests/`, 82 test cases:
 - `test_bigint.cpp` (11), `test_group_setup.cpp` (5), `test_rsa_keygen.cpp` (4), `test_hash_utils.cpp` (8, includes FDH tests: deterministic, in [0,n), fills >2000 bits for a 2047-bit n, depends on every field and on n).
 - `test_bank_wallet.cpp` (17): honest issuance, blindness, denominations, tamper/replay/other-bank attacks, ledger.
 - `test_zkp.cpp` (13): completeness, rejection cases, extraction, simulator, challenge/tag hash properties.
-- `test_clearance.cpp` (23): end-to-end in-process: withdraw/pay/redeem; double spend traced to the withdrawer; only the cheater is flagged; duplicate vs accusation; forged response; redirected transcript; wallet won't answer another receiver's challenge; forged signature; wrong denomination; honest wallet refuses re-spend; unknown receiver account; insufficient balance leaves no trace; logged tag reused; same tag twice in a batch; unknown denomination. Cut-and-choose: exactly k candidates; charged only after openings check out; one open withdrawal at a time, no finish without a start; false tags everywhere always caught; missing or wrong opening caught and flagged; one false tag caught unless kept (1/k), and when kept the double spend is untraceable.
+- `test_clearance.cpp` (25): end-to-end in-process: withdraw/pay/redeem; two different coins sharing a serial are both paid; a shared serial does not hide a double spend; double spend traced to the withdrawer; only the cheater is flagged; duplicate vs accusation; forged response; redirected transcript; wallet won't answer another receiver's challenge; forged signature; wrong denomination; honest wallet refuses re-spend; unknown receiver account; insufficient balance leaves no trace; logged tag reused; same tag twice in a batch; unknown denomination. Cut-and-choose: exactly k candidates; charged only after openings check out; one open withdrawal at a time, no finish without a start; false tags everywhere always caught; missing or wrong opening caught and flagged; one false tag caught unless kept (1/k), and when kept the double spend is untraceable.
 
 End-to-end `scripts/e2e.py` (starts real servers on temp ports; about 45 checks): [1] accounts (signup incl. capitalised "Erin", duplicate rejected, wrong password), [2] generate coins, [3] transfer and redeem, [4] double spend detected and traced (bank flags exactly alice), [5] forged/malformed requests (forged transcript invalid, redeem for someone else's id refused, withdraw without session refused, bank refuses calls without the internal key), [6] unknown/offline receivers and insufficient balance, [7] capitals / case-insensitive / paying yourself, [8] state survives a bank restart, [9] app server restart (wallet falls back to sign-in; accounts and local coins survive).
 
