@@ -6,8 +6,15 @@ tracing at the bank. Users run a local **wallet** that holds their coins and
 does all the cryptography; an **app server** handles logins and routes
 payments; a **bank server** signs coins and clears payments.
 
-See [DESIGN.md](DESIGN.md) for the protocol, the threat model and the design
-decisions.
+Course project for **CS670: Cryptographic Techniques for Privacy Preservation**,
+IIT Kanpur, under the guidance of **Prof. Adithya Vadapalli**.
+
+| Team member | Roll number |
+|---|---|
+| Bikramjeet Singh | 230298 |
+| Dharajiya Yug | 230362 |
+| Rudra Sinha | 230880 |
+| Siddharth Miglani | 231006 |
 
 ## How it works (short)
 
@@ -24,8 +31,11 @@ decisions.
 - **Transfer (pay):** wallet-to-wallet, relayed by the app, no bank contact.
   The receiver checks the signature, sends a challenge `x = H(receiver, time, nonce)`,
   and the payer answers `y = s + a*x`. The receiver checks `g^y == S * A^x`.
-- **Redeem (deposit):** the receiver sends the transcript to the bank. A coin
-  seen twice with different challenges gives `a` and `s`; the bank hashes them,
+- **Redeem (deposit):** the receiver sends the transcript to the bank, which
+  re-checks the signature and the proof and looks the coin up in its spent-coin
+  list (keyed by the whole signed coin: value, serial, `A` and `S`). A new coin
+  is credited; the same transcript again is a harmless duplicate. A coin seen
+  twice with different challenges gives `a` and `s`; the bank hashes them,
   finds the tag, and flags the account that withdrew the coin.
 
 ## Dependencies
@@ -63,9 +73,11 @@ If GMP/OpenSSL are not found, `make print-config` shows what was detected, and
 ```sh
 scripts/run_demo.sh            # full-size parameters (first start takes a few seconds)
 scripts/run_demo.sh --fast     # small parameters
+scripts/run_demo.sh --no-tls   # plain HTTP between the programs
 ```
 
-This starts the bank (`:9000`), the app server (`:8000`) and two wallets. Open
+This starts the bank (`:9000`), the app server (`:8000`) and two wallets, with
+TLS between them. Open
 <http://127.0.0.1:8081/> and <http://127.0.0.1:8082/> in two browser windows,
 create an account in each (new accounts get a simulated balance of 100), then:
 
@@ -77,7 +89,9 @@ create an account in each (new accounts get a simulated balance of 100), then:
    to your bank balance.)
 4. To demo a double spend: in A, generate a coin, pay it to B, then tick
    *allow re-spending an already spent coin* and pay the same coin to a third
-   user C (a third wallet: `./build/wallet_agent --port 8083 --data demo-data/wallet-c`).
+   user C (a third wallet:
+   `./build/wallet_agent --port 8083 --data demo-data/wallet-c --app-ca demo-data/tls/ca.crt`,
+   or without `--app-ca` when the demo was started with `--no-tls`).
    When B and C both redeem, the second is rejected as a double spend and
    `logs/bank.log` shows the account the bank traced it to.
 
@@ -139,15 +153,24 @@ tests; `scripts/e2e.py` is the end-to-end test.
 
 ## Tests
 
-- Unit tests per module, plus attack simulations: double spend traced to the
-  withdrawer, forged response, replayed transcript, transcript redirected to
-  another receiver, forged signature, wrong denomination, subgroup and `x = 0`
-  attacks.
-- `scripts/e2e.py` drives the real servers over HTTP: signup, generate,
-  transfer, redeem, double spend, forged redeem, offline receiver,
-  insufficient balance, and a bank restart.
+Each attack test plays the attacker and passes only if GhostCash stops it.
 
-## Known limitations
+- **Unit tests** (Catch2, `tests/`) for every module, plus attack simulations:
+  double spend traced to the withdrawer, only the cheater flagged, resent
+  transcript treated as a duplicate (no accusation), forged response, transcript
+  redirected to another receiver, forged or tampered signature, wrong
+  denomination, `A`/`S` outside the subgroup, `x = 0` and out-of-range `y`,
+  zero-knowledge simulation and secret extraction, cut-and-choose (false tags,
+  missing or wrong openings, one open withdrawal at a time, the 1-in-`k`
+  case), two different coins sharing a serial, insufficient balance.
+- **End-to-end** (`scripts/e2e.py`) starts the real bank, app server and
+  wallets and drives them over HTTPS: signup and login, generate, transfer,
+  redeem, double spend, a lying client caught by cut-and-choose, forged redeem,
+  redeeming someone else's payment, calls without the internal key or without
+  TLS, an untrusted certificate, unknown and offline receivers, insufficient
+  balance, and bank and app-server restarts.
+
+## Assumptions and known limitations
 
 - **Cut-and-choose is probabilistic.** A wallet that puts one false tag among its
   `k` candidates escapes detection at withdrawal with probability `1/k` (10%);
